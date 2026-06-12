@@ -1,0 +1,16 @@
+name = "mailsink"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+[vars]
+BLOCK_MODE = "reject"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mailsink"
+database_id = "YOUR_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "RAW"
+bucket_name = "mailsink-raw"
