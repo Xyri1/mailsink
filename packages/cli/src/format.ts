@@ -22,9 +22,12 @@ export function formatEmailWithBody(email: EmailWithBody, options: FormatOptions
     `To: ${email.toAddr}`,
     `Subject: ${email.subject ?? "(no subject)"}`,
     `Date: ${new Date(email.dateHeader ?? email.receivedAt).toISOString()}`,
-    `Attachments: ${email.attachmentCount}`,
-    ""
+    `Attachments: ${email.attachmentCount}`
   ];
+
+  if (email.forwardTo) lines.push(`Route: ${email.forwardTo}`);
+  if (email.forwardError) lines.push(`Forward error: ${email.forwardError}`);
+  lines.push("");
 
   if (email.textBody !== null) {
     lines.push(email.textBody);
@@ -44,6 +47,12 @@ export function formatAliases(aliases: AliasRecord[], options: FormatOptions) {
     String(record.emailCount).padStart(3),
     record.note ?? ""
   ].join(" ")).join("\n");
+}
+
+export function formatRoutes(aliases: AliasRecord[]) {
+  return aliases.length === 0 ? "no routes configured" : aliases.map((record) =>
+    `${record.alias}@${record.domain} -> ${record.forwardTo}${record.status === "blocked" ? " (blocked)" : ""}`
+  ).join("\n");
 }
 
 export function relativeTime(value: number, now: number) {

@@ -1,6 +1,6 @@
 # mailsink CLI usage
 
-The mailsink CLI is a task-verb client for the mailsink Worker `/v1` API. Use it to read recent mail, inspect raw messages, block leaked aliases, and manage alias notes without calling the JSON API by hand.
+The mailsink CLI reads and manages mail through the Worker `/v1` API. It also uses Wrangler for Cloudflare destination verification when configuring a route.
 
 ## Run it from source
 
@@ -141,6 +141,16 @@ Annotate an alias:
 mailsink note netflix "netflix trial 2026-06"
 ```
 
+Route an alias after storing each message:
+
+```bash
+mailsink route
+mailsink route support@example.com may@email.com
+mailsink route support --remove
+```
+
+The destination must be verified on the active Wrangler Cloudflare account. If it is missing, `route` asks Cloudflare to send a verification email and leaves the mapping unchanged. Verify the address, then rerun the same command. Routes can be configured before an alias receives mail and appear in `mailsink route` immediately with zero stored messages.
+
 Delete mail:
 
 ```bash
@@ -157,7 +167,7 @@ mailsink whoami
 mailsink logout
 ```
 
-These commands affect Wrangler's Cloudflare session only. Normal mail commands talk to the Worker API with the stored Worker API token.
+These commands affect Wrangler's Cloudflare session only. Mail commands talk to the Worker API with the stored Worker API token; `route` additionally uses that Wrangler session to check or request destination verification.
 
 ## Alias matching
 
@@ -185,15 +195,19 @@ Write commands require exactly one match:
 - `burn <alias>`
 - `unburn <alias>`
 - `note <alias> <text>`
+- `route <alias> <destination>`
+- `route <alias> --remove`
 - `purge <alias>`
 
 If a write query matches multiple aliases, the CLI exits with an error and lists candidates. Use a longer query, `--exact`, or an inline domain to disambiguate.
 
-`burn` can pre-block a never-seen alias only when intent is explicit:
+`burn` and `route` can preconfigure a never-seen alias only when intent is explicit:
 
 ```bash
 mailsink burn promo-new@example.com
 mailsink --exact burn promo-new
+mailsink route support@example.com may@email.com
+mailsink --exact route support may@email.com
 ```
 
 A bare fuzzy query that matches nothing is an error.

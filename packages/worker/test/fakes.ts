@@ -93,29 +93,32 @@ class FakeD1PreparedStatement {
       const [
         id, alias, domain, to_addr, envelope_from, from_addr, from_name, subject,
         date_header, received_at, size_bytes, text_body, has_html, attachment_count,
-        parse_error, r2_key
+        parse_error, r2_key, forward_to
       ] = this.bindings;
       this.db.emails.set(String(id), {
         id: String(id), alias: String(alias), domain: String(domain), to_addr,
         envelope_from, from_addr, from_name, subject, date_header, received_at,
-        size_bytes, text_body, has_html, attachment_count, parse_error, r2_key
+        size_bytes, text_body, has_html, attachment_count, parse_error, r2_key, forward_to,
+        forward_error: null
       } as EmailRow);
       return { success: true, meta: { changes: 1 } };
     }
 
     if (sql.startsWith("INSERT INTO aliases")) {
-      const isPatch = this.bindings.length === 6;
+      const isPatch = this.sql.includes("excluded.status");
       const [alias, domain] = this.bindings;
       const status = isPatch ? this.bindings[2] : "active";
       const note = isPatch ? this.bindings[3] : null;
-      const first_seen_at = isPatch ? this.bindings[4] : this.bindings[2];
-      const last_seen_at = isPatch ? this.bindings[5] : this.bindings[3];
+      const forward_to = isPatch ? this.bindings[4] : null;
+      const first_seen_at = isPatch ? this.bindings[5] : this.bindings[2];
+      const last_seen_at = isPatch ? this.bindings[6] : this.bindings[3];
       const key = this.db.aliasKey(String(alias), String(domain));
       const current = this.db.aliases.get(key);
       this.db.aliases.set(key, current ? isPatch ? {
         ...current,
         status: String(status),
         note,
+        forward_to,
         last_seen_at
       } as AliasRow : {
         ...current,
@@ -126,6 +129,7 @@ class FakeD1PreparedStatement {
         domain: String(domain),
         status: String(status),
         note,
+        forward_to,
         first_seen_at,
         last_seen_at,
         email_count: isPatch ? 0 : 1
@@ -135,6 +139,12 @@ class FakeD1PreparedStatement {
 
     if (sql.startsWith("UPDATE aliases")) {
       return { success: true, meta: { changes: 1 } };
+    }
+
+    if (sql.startsWith("UPDATE emails SET forward_error")) {
+      const row = this.db.emails.get(String(this.bindings[1]));
+      if (row) row.forward_error = this.bindings[0];
+      return { success: true, meta: { changes: row ? 1 : 0 } };
     }
 
     if (sql.startsWith("DELETE FROM emails WHERE id = ?")) {
@@ -176,10 +186,11 @@ class FakeD1PreparedStatement {
 
   private listAliases() {
     let rows = [...this.db.aliases.values()];
-    const [q, , status, , domain, , limit] = this.bindings;
+    const [q, , status, , domain, , routed, limit] = this.bindings;
     if (q) rows = rows.filter((row) => row.alias.toLowerCase().includes(String(q).toLowerCase()));
     if (status) rows = rows.filter((row) => row.status === status);
     if (domain) rows = rows.filter((row) => row.domain === domain);
+    if (routed) rows = rows.filter((row) => row.forward_to != null);
     rows.sort((a, b) => Number(b.last_seen_at) - Number(a.last_seen_at));
     return rows.slice(0, Number(limit));
   }

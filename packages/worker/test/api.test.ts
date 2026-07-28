@@ -26,6 +26,34 @@ describe("API auth", () => {
 });
 
 describe("alias API", () => {
+  test("routes an unseen alias, lists routed aliases, and preserves omitted fields", async () => {
+    const created = await worker.fetch(request("/v1/aliases/example.com/Netflix-X7F2", {
+      method: "PATCH",
+      body: JSON.stringify({ note: "netflix trial", forwardTo: " me@example.net " })
+    }), env);
+    expect(await created.json() as unknown).toMatchObject({
+      alias: "netflix-x7f2", note: "netflix trial", forwardTo: "me@example.net", emailCount: 0
+    });
+
+    const routed = await worker.fetch(request("/v1/aliases?routed=true"), env);
+    expect(await routed.json() as unknown).toMatchObject({ aliases: [{ alias: "netflix-x7f2", forwardTo: "me@example.net" }] });
+
+    const cleared = await worker.fetch(request("/v1/aliases/example.com/netflix-x7f2", {
+      method: "PATCH",
+      body: JSON.stringify({ forwardTo: null })
+    }), env);
+    expect(await cleared.json() as unknown).toMatchObject({ note: "netflix trial", forwardTo: null });
+  });
+
+  test("rejects malformed forward destinations", async () => {
+    const response = await worker.fetch(request("/v1/aliases/example.com/netflix", {
+      method: "PATCH",
+      body: JSON.stringify({ forwardTo: "two@@example.com" })
+    }), env);
+    expect(response.status).toBe(400);
+    expect(await response.json() as unknown).toMatchObject({ error: { code: "bad_request" } });
+  });
+
   test("pre-blocks an alias before first mail and rejects + aliases in the path", async () => {
     const blocked = await worker.fetch(request("/v1/aliases/example.com/Netflix-X7F2", {
       method: "PATCH",

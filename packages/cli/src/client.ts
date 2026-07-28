@@ -31,11 +31,15 @@ export class MailsinkClient {
     private readonly fetch: Fetch = globalThis.fetch
   ) {}
 
-  listAliases(params: { q?: string; domain?: string; status?: "active" | "blocked"; limit?: number } = {}) {
+  listAliases(params: { q?: string; domain?: string; status?: "active" | "blocked"; routed?: boolean; limit?: number } = {}) {
     return this.request<ListAliasesResponse>("GET", ROUTES.aliases, params);
   }
 
-  patchAlias(domain: string, alias: string, body: { status?: "active" | "blocked"; note?: string | null }) {
+  patchAlias(domain: string, alias: string, body: {
+    status?: "active" | "blocked";
+    note?: string | null;
+    forwardTo?: string | null;
+  }) {
     return this.request<AliasRecord>("PATCH", ROUTES.alias(encodeURIComponent(domain), encodeURIComponent(alias)), {}, body);
   }
 

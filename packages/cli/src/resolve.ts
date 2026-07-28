@@ -57,6 +57,7 @@ function toAliasRecord(query: AliasQuery): AliasRecord {
     domain: query.domain,
     status: "active",
     note: null,
+    forwardTo: null,
     firstSeenAt: 0,
     lastSeenAt: 0,
     emailCount: 0

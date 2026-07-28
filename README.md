@@ -2,7 +2,7 @@
 
 A catch-all email sink for domains on Cloudflare, built for **disposable per-service aliases**.
 
-Sign up anywhere with an invented address — `netflix-x7f2@example.com` — with no pre-registration. Inbound mail is stored durably and read through a small authenticated JSON API. When an alias leaks to spammers, **burn it**: mail to it is rejected during the SMTP transaction and nothing is stored.
+Sign up anywhere with an invented address — `netflix-x7f2@example.com` — with no pre-registration. Inbound mail is stored durably and read through a small authenticated JSON API. Route useful aliases to a verified inbox after storage, or **burn** leaked aliases so future mail is rejected.
 
 ```
                         ┌────────────────────────────────────┐
@@ -19,6 +19,7 @@ Sign up anywhere with an invented address — `netflix-x7f2@example.com` — wit
 - **Implicit aliases.** An alias exists the moment it receives mail. No registration step.
 - **Burning.** `PATCH /v1/aliases/:domain/:alias` with `{"status": "blocked"}` makes future mail bounce at SMTP time (or drop silently with `BLOCK_MODE=drop`). Upserts, so you can pre-block an alias before it's ever used.
 - **Durable storage.** The raw RFC 5322 message in R2 is canonical — written before parsing, never lost even when parsing fails. D1 holds queryable metadata and a truncated text body.
+- **Store-then-forward routes.** Set one verified destination per alias. Mailsink stores the message first, then forwards it; a forwarding failure is recorded without losing or retrying the stored message.
 - **Subaddress folding.** `x+anything@` is normalized to `x@`, so blocking `x` blocks every tag variant.
 - **One Worker, N domains.** Point each zone's Email Routing catch-all at the same Worker. Explicit routing rules for real addresses keep working — only unmatched recipients reach the sink.
 - **The dominant query in one round trip:**
@@ -51,8 +52,8 @@ All routes require `Authorization: Bearer <API_TOKEN>`. Base path `/v1`, JSON in
 | `GET /v1/emails/:id/raw` | Stream the original `.eml` |
 | `DELETE /v1/emails/:id` | Delete one message (D1 row + R2 object) |
 | `DELETE /v1/emails?alias=&domain=` | Bulk purge an alias's mail (both params required) |
-| `GET /v1/aliases` | List aliases. Filters: `q` (substring), `status`, `domain` |
-| `PATCH /v1/aliases/:domain/:alias` | Set `status` (`active`/`blocked`) and/or `note`. Upserts — this is how pre-blocking works |
+| `GET /v1/aliases` | List aliases. Filters: `q` (substring), `status`, `domain`, `routed=true` |
+| `PATCH /v1/aliases/:domain/:alias` | Set `status`, `note`, and/or `forwardTo`. Upserts for pre-blocking and pre-routing |
 
 See [SPEC.md §7](SPEC.md) for full parameter semantics and the error envelope.
 
@@ -145,11 +146,14 @@ mailsink burn promo-new@example.com         # pre-block an explicit alias
 mailsink unburn promo-new@example.com
 mailsink aliases net --blocked
 mailsink note netflix "netflix trial 2026-06"
+mailsink route                              # list configured routes
+mailsink route support@example.com may@email.com
+mailsink route support --remove
 mailsink rm 01K7VTNH010000000000000000
 mailsink purge netflix --yes
 ```
 
-Fuzzy alias queries resolve through `GET /v1/aliases?q=...`. Read commands may fan out across multiple matches; write commands require exactly one match unless `burn` is given an explicit alias with `--exact` or an inline domain for pre-blocking. Add `--json` to any command to emit the raw API response for scripting.
+Fuzzy alias queries resolve through `GET /v1/aliases?q=...`. Read commands may fan out across multiple matches; write commands require exactly one match. `burn` and `route` can preconfigure an unseen alias when given an inline domain or `--exact`. Add `--json` to any command to emit the raw API response for scripting.
 
 ## Development
 

@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-A catch-all email sink for domains hosted on Cloudflare, built for **disposable per-service aliases**. Sign up anywhere with an invented address (`netflix-x7f2@example.com`) — no pre-registration. Inbound mail is stored durably (raw `.eml` in R2, queryable metadata in D1) and read through a small authenticated JSON API by a CLI. When an alias leaks to spammers, it is **burned**: mail to it is rejected at SMTP time and nothing is stored.
+A catch-all email sink for domains hosted on Cloudflare, built for **disposable per-service aliases**. Sign up anywhere with an invented address (`netflix-x7f2@example.com`) — no pre-registration. Inbound mail is stored durably (raw `.eml` in R2, queryable metadata in D1) and read through a small authenticated JSON API by a CLI. Useful aliases can be routed to a verified inbox after storage; leaked aliases can be burned so future mail is rejected.
 
 ## 2. Goals
 
@@ -18,10 +18,11 @@ A catch-all email sink for domains hosted on Cloudflare, built for **disposable 
 5. Read path optimized for the dominant query — *"latest mail to alias X (from Y)"* — in one round trip.
 6. Single-secret bearer auth suitable for a personal CLI.
 7. Multi-domain support with one Worker deployment.
+8. One store-then-forward destination per alias, configurable before first mail.
 
 ## 3. Non-goals
 
-Deferred to §13: per-alias forwarding ("promote to real inbox"), full-text search, attachment extraction endpoints, webhooks/push notifications, outbound send/reply, retention/purge cron, web UI, multi-user auth, spam scoring. The CLI itself is out of scope here.
+Deferred to §13: full-text search, attachment extraction endpoints, webhooks/push notifications, outbound send/reply, retention/purge cron, web UI, multi-user auth, spam scoring. The CLI itself is out of scope here.
 
 ## 4. System overview
 
@@ -35,7 +36,7 @@ Deferred to §13: per-alias forwarding ("promote to real inbox"), full-text sear
                         └────────────────────────────────────┘
 ```
 
-- **Explicit Email Routing rules win over catch-all.** Real addresses on the domain that forward to a verified inbox keep working untouched; only unmatched recipients reach the Worker.
+- **Explicit Email Routing rules win over catch-all.** Real addresses configured that way bypass mailsink. Mailsink routes are different: the catch-all still reaches the Worker, which stores and then forwards.
 - **One Worker, N domains.** Each zone's Email Routing catch-all points at the same Worker. Domain is a first-class column everywhere.
 
 ### Repo layout (pnpm workspaces)
@@ -62,7 +63,7 @@ Input: `ForwardableEmailMessage` — `message.from` (envelope MAIL FROM), `messa
    - `local` = RCPT TO local part.
    - `alias` = `local.split('+')[0].toLowerCase()` — subaddress folding: blocking `x` also blocks `x+anything`.
    - `to_addr` stores the raw RCPT TO verbatim.
-2. **Blocklist check.** `SELECT status FROM aliases WHERE alias = ? AND domain = ?`.
+2. **Alias policy check.** `SELECT status, forward_to FROM aliases WHERE alias = ? AND domain = ?`.
    - If `blocked` and `BLOCK_MODE = "reject"` (default): `message.setReject("address unavailable")`, return. Sender receives a permanent failure; nothing is stored.
    - If `blocked` and `BLOCK_MODE = "drop"`: return without action — Email Routing drops the message silently (sender believes it was delivered). *Caveat:* the no-action-equals-drop behavior is long-observed but not documented in the current Email Service docs; verified by a test in §12.
 3. **Buffer the raw message.** Read `message.raw` fully into an `ArrayBuffer`. Inbound cap is 25 MiB vs 128 MB Worker memory; buffering beats stream-teeing in complexity and lets R2 write and parser share one copy.
@@ -71,9 +72,10 @@ Input: `ForwardableEmailMessage` — `message.from` (envelope MAIL FROM), `messa
    - On parse failure: insert the row anyway with `parse_error = 1`, `from_addr` falling back to the envelope MAIL FROM, `subject`/`text_body` NULL. The `.eml` remains fully recoverable via `/raw`.
    - `text_body` is truncated to **65,536 characters**. HTML bodies and attachments are *not* stored in D1 — they live only in the `.eml`.
 6. **Persist metadata** in one `DB.batch([...])` (implicit transaction):
-   - `INSERT INTO emails (...)`
+   - `INSERT INTO emails (...)`, including the selected `forward_to`
    - `INSERT INTO aliases (...) ON CONFLICT(alias, domain) DO UPDATE SET last_seen_at = excluded.last_seen_at, email_count = email_count + 1`
-7. **Error semantics: fail loud.** Any R2/D1 failure throws out of the handler → Cloudflare signals a transient SMTP error → the sending server retries on its own schedule. The Worker never acks-and-drops. Known tradeoff: an R2 write that succeeds before a D1 failure leaves an orphaned `.eml` (the retry stores under a fresh ULID); orphans are harmless and removable later, and accepting them avoids two-phase-commit ceremony.
+7. **Forward after storage.** If the alias has `forward_to`, call `message.forward(forward_to)` only after the R2 put and D1 batch succeed. On an immediate failure, update the email row's `forward_error`; log and return even if that diagnostic update fails. The stored inbound message is not retried.
+8. **Storage error semantics: fail loud.** Any primary R2/D1 storage failure throws out of the handler → Cloudflare signals a transient SMTP error → the sending server retries on its own schedule. The Worker never acks-and-drops. Known tradeoff: an R2 write that succeeds before a D1 failure leaves an orphaned `.eml` (the retry stores under a fresh ULID); orphans are harmless and removable later, and accepting them avoids two-phase-commit ceremony.
    - *Caveat:* the throw→transient-SMTP-error semantics are observed behavior, not documented contract — the Email Service docs do not specify the SMTP response for an unhandled handler exception. Verified empirically per §12 before relying on it. Deliberately **not** doing what Cloudflare's error-handling example does (catch + `setReject` fallback): `setReject` is a *permanent* failure and would convert transient storage errors into bounces, defeating the retry design.
 
 ### Reference pseudocode
@@ -91,7 +93,8 @@ async email(message, env) {
   const key = `${domain}/${alias}/${id}.eml`;
   await env.RAW.put(key, buf);
   const meta = await parseSafely(buf, message.from);   // never throws; sets parse_error
-  await env.DB.batch([insertEmail(...), upsertAlias(...)]);
+  await env.DB.batch([insertEmail({ ...meta, forwardTo: row?.forward_to }), upsertAlias(...)]);
+  if (row?.forward_to) await forwardAndRecordFailure(message, row.forward_to, id, env);
 }
 ```
 
@@ -106,6 +109,7 @@ CREATE TABLE aliases (
   status         TEXT    NOT NULL DEFAULT 'active'
                          CHECK (status IN ('active', 'blocked')),
   note           TEXT,                        -- e.g. "netflix trial 2026-06"
+  forward_to     TEXT,                        -- verified store-then-forward destination
   first_seen_at  INTEGER NOT NULL,            -- unix ms
   last_seen_at   INTEGER NOT NULL,
   email_count    INTEGER NOT NULL DEFAULT 0,
@@ -128,7 +132,9 @@ CREATE TABLE emails (
   has_html         INTEGER NOT NULL DEFAULT 0,
   attachment_count INTEGER NOT NULL DEFAULT 0,
   parse_error      INTEGER NOT NULL DEFAULT 0,
-  r2_key           TEXT    NOT NULL
+  r2_key           TEXT    NOT NULL,
+  forward_to       TEXT,                      -- route snapshot used for this message
+  forward_error    TEXT                       -- immediate message.forward() failure
 );
 
 CREATE INDEX idx_emails_alias ON emails (alias, domain, id DESC);
@@ -192,11 +198,12 @@ GET /v1/emails?alias=netflix-x7f2&domain=example.com&from=netflix&limit=1&includ
 | `q` | string | case-insensitive substring on `alias` — powers CLI fuzzy resolution |
 | `status` | `active \| blocked` | filter |
 | `domain` | string | exact match |
+| `routed` | `true` | only aliases with `forward_to` |
 | `limit` | int | default 50, max 200; no cursor (personal scale) |
 
 Response: `{ "aliases": AliasRecord[] }`.
 
-**`PATCH /v1/aliases/:domain/:alias`** — body `{ "status"?: "active" | "blocked", "note"?: string }`. **Upserts**: unknown alias is created (`email_count = 0`) — this is how pre-blocking works before an alias ever receives mail. Server normalizes the path alias (lowercases; rejects `+` with `400`). Response: the full `AliasRecord`.
+**`PATCH /v1/aliases/:domain/:alias`** — body `{ "status"?: "active" | "blocked", "note"?: string | null, "forwardTo"?: string | null }`. **Upserts**: an unknown alias is created (`email_count = 0`) for explicit pre-blocking or pre-routing. `forwardTo: null` clears a route. Server normalizes the path alias (lowercases; rejects `+` with `400`) and validates a non-null destination as one email address. Response: the full `AliasRecord`.
 
 Design intent: `(from, to)` is the human query path and both are **filters**, not keys — `from` because real senders are unguessable ESP addresses (substring match), `to` because aliases repeat over time (latest-wins via `limit=1`). ULIDs are plumbing: the CLI carries them between `list` → `raw`/`delete`; nobody types one.
 
@@ -218,6 +225,8 @@ export interface EmailSummary {
   hasHtml: boolean;
   attachmentCount: number;
   parseError: boolean;
+  forwardTo: string | null;
+  forwardError: string | null;
 }
 
 export interface EmailWithBody extends EmailSummary {
@@ -234,6 +243,7 @@ export interface AliasRecord {
   domain: string;
   status: "active" | "blocked";
   note: string | null;
+  forwardTo: string | null;
   firstSeenAt: number;
   lastSeenAt: number;
   emailCount: number;
@@ -296,7 +306,7 @@ Email Routing now lives under the **Email Service** product; all dashboard paths
 3. **Routing Rules** → Catch-all rule → Active, action **Send to a Worker** → `mailsink`.
 4. Repeat per additional domain; same Worker.
 
-No destination-address verification is involved for the Worker action; nothing is forwarded.
+The catch-all Worker action itself needs no destination verification. `mailsink route` checks the destination on the active Wrangler Cloudflare account and requests verification when it is missing; it saves the alias mapping only after Cloudflare reports the destination verified.
 
 Notes:
 - **Subaddressing toggle (Email Routing → Settings): leave it at its default (off).** The Worker's `+` folding (§5.1) works either way — unmatched recipients reach the catch-all with `message.to` verbatim. The toggle only changes explicit rules: when on, `realuser+foo@` matches the `realuser@` rule and routes to the real inbox instead of the sink. Either state is coherent; this spec assumes the default (off), which means `+` variants of real addresses fall through to the sink too. Turn it on if you'd rather have `realuser+foo@` follow `realuser@`'s forwarding.
@@ -312,7 +322,7 @@ Notes:
 
 ## 12. Testing
 
-- **Unit/integration:** `@cloudflare/vitest-pool-workers` with real D1/R2 bindings (miniflare). Cover: normalization table (casing, `+` folding, weird local parts), blocked→reject vs drop, parse-failure path (`parse_error=1`, envelope fallback, `.eml` still stored), ingest batch upsert counts, every endpoint's happy path + `401/400/404`, pagination/`since` cursor math, bulk delete leaves alias status intact.
+- **Unit/integration:** `@cloudflare/vitest-pool-workers` with real D1/R2 bindings (miniflare). Cover: normalization table (casing, `+` folding, weird local parts), blocked→reject vs drop, parse-failure path (`parse_error=1`, envelope fallback, `.eml` still stored), store-before-forward ordering and forward failure recording, ingest batch upsert counts, every endpoint's happy path + `401/400/404`, pagination/`since` cursor math, bulk delete leaves alias status intact.
 - **Local manual:** `wrangler dev` exposes a local email injection endpoint:
 
 ```bash
@@ -322,11 +332,10 @@ curl -X POST "http://localhost:8787/cdn-cgi/handler/email?from=noreply@em.netfli
 ```
 
 - Fixtures: a small `.eml` corpus — plain text, multipart+HTML, attachment-bearing, and one deliberately malformed message.
-- **One-time platform verification (against a real deployment, before trusting §5.7):** the SMTP behaviors the design leans on are observed, not documented. Send real mail (from a DMARC-passing sender, per §11) and confirm: (a) a deliberately thrown handler exception produces a *transient* 4xx at the sender (retry, not bounce); (b) returning without action drops the message silently; (c) `setReject` produces a permanent 5xx. Record the observed SMTP codes in DECISIONS.md.
+- **One-time platform verification (against a real deployment, before trusting §5.8):** the SMTP behaviors the design leans on are observed, not documented. Send real mail (from a DMARC-passing sender, per §11) and confirm: (a) a deliberately thrown handler exception produces a *transient* 4xx at the sender (retry, not bounce); (b) returning without action drops the message silently; (c) `setReject` produces a permanent 5xx. Record the observed SMTP codes in DECISIONS.md.
 
 ## 13. Deferred features
 
-- **Promote alias:** per-alias `forward_to` → `message.forward()` for aliases that turn out to matter.
 - Retention cron (scheduled handler purging old mail / orphaned R2 objects).
 - Full-text search (D1 FTS5) if `LIKE` ever feels slow.
 - Attachment extraction endpoint (parse on read from `.eml`).

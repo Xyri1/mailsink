@@ -13,6 +13,8 @@ export interface EmailSummary {
   hasHtml: boolean;
   attachmentCount: number;
   parseError: boolean;
+  forwardTo: string | null;
+  forwardError: string | null;
 }
 
 export interface EmailWithBody extends EmailSummary {
@@ -29,6 +31,7 @@ export interface AliasRecord {
   domain: string;
   status: "active" | "blocked";
   note: string | null;
+  forwardTo: string | null;
   firstSeenAt: number;
   lastSeenAt: number;
   emailCount: number;

@@ -45,7 +45,9 @@ export function mapEmailRow(row: EmailRow, includeBody = false): EmailSummary | 
     sizeBytes: row.size_bytes,
     hasHtml: row.has_html === 1,
     attachmentCount: row.attachment_count,
-    parseError: row.parse_error === 1
+    parseError: row.parse_error === 1,
+    forwardTo: row.forward_to,
+    forwardError: row.forward_error
   };
   return includeBody ? { ...summary, textBody: row.text_body } : summary;
 }
@@ -56,6 +58,7 @@ export function mapAliasRow(row: AliasRow): AliasRecord {
     domain: row.domain,
     status: row.status,
     note: row.note,
+    forwardTo: row.forward_to,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
     emailCount: row.email_count

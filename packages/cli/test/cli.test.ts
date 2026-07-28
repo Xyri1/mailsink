@@ -14,6 +14,7 @@ let cloudflareActions: string[];
 let initOrder: string[];
 let expectedNewHostToken: string;
 let promptModes: unknown[];
+let destinationStatus: "verified" | "pending";
 
 beforeEach(() => {
   savedConfig = null;
@@ -22,6 +23,7 @@ beforeEach(() => {
   initOrder = [];
   expectedNewHostToken = "new-token";
   promptModes = [];
+  destinationStatus = "verified";
   aliases = [
     alias("netflix-x7f2", { note: "trial", emailCount: 2 }),
     alias("networking", { note: null, emailCount: 1 }),
@@ -104,6 +106,71 @@ describe("write commands", () => {
     expect(result.stdout).toContain("deleted 2 emails from netflix-x7f2@example.com");
     expect(emails.some((message) => message.alias === "netflix-x7f2")).toBe(false);
   });
+
+  test("route reports configured mappings before an alias receives mail", async () => {
+    aliases.push(alias("support", { forwardTo: "may@email.com", emailCount: 0 }));
+
+    const result = await cli(["route"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("support@example.com");
+    expect(result.stdout).toContain("may@email.com");
+  });
+
+  test("route says when no mappings are configured", async () => {
+    const result = await cli(["route"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("no routes configured");
+  });
+
+  test("route preconfigures an explicit unseen alias after destination verification", async () => {
+    const result = await cli(["route", "support@example.com", "may@email.com"], {
+      cloudflareSetup: fakeCloudflareSetup()
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("routed support@example.com to may@email.com");
+    expect(aliases.find((record) => record.alias === "support")).toMatchObject({
+      forwardTo: "may@email.com",
+      emailCount: 0
+    });
+    expect(cloudflareActions).toEqual(["destination:may@email.com"]);
+  });
+
+  test("route requests verification without saving a pending destination", async () => {
+    destinationStatus = "pending";
+
+    const result = await cli(["route", "support@example.com", "may@email.com"], {
+      cloudflareSetup: fakeCloudflareSetup()
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("verification pending for may@email.com");
+    expect(aliases.some((record) => record.alias === "support")).toBe(false);
+  });
+
+  test("route --remove clears forwarding without deleting the alias", async () => {
+    aliases.push(alias("support", { forwardTo: "may@email.com", emailCount: 0 }));
+
+    const result = await cli(["route", "support", "--remove"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("removed route for support@example.com");
+    expect(aliases.find((record) => record.alias === "support")).toMatchObject({
+      forwardTo: null,
+      emailCount: 0
+    });
+    expect(cloudflareActions).toEqual([]);
+  });
+
+  test("route --remove does not create an unseen alias", async () => {
+    const result = await cli(["--exact", "route", "missing@example.com", "--remove"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("no route configured");
+    expect(aliases.some((record) => record.alias === "missing")).toBe(false);
+  });
 });
 
 describe("config and credentials", () => {
@@ -126,7 +193,8 @@ describe("config and credentials", () => {
         },
         putWorkerSecret: async (token) => {
           cloudflareActions.push(`secret:${token}`);
-        }
+        },
+        ensureDestination: async () => "verified"
       }
     });
 
@@ -158,7 +226,8 @@ describe("config and credentials", () => {
         },
         putWorkerSecret: async (token) => {
           cloudflareActions.push(`secret:${token}`);
-        }
+        },
+        ensureDestination: async () => "verified"
       }
     });
 
@@ -190,7 +259,8 @@ describe("config and credentials", () => {
         },
         putWorkerSecret: async (token) => {
           cloudflareActions.push(`secret:${token}`);
-        }
+        },
+        ensureDestination: async () => "verified"
       }
     });
 
@@ -269,7 +339,8 @@ describe("config and credentials", () => {
         putWorkerSecret: async (token) => {
           cloudflareActions.push(`secret:${token}`);
           initOrder.push("secret");
-        }
+        },
+        ensureDestination: async () => "verified"
       }
     });
 
@@ -297,7 +368,8 @@ describe("config and credentials", () => {
           cloudflareActions.push("whoami");
           return "user@example.com\n";
         },
-        putWorkerSecret: async (token) => { cloudflareActions.push(`secret:${token}`); }
+        putWorkerSecret: async (token) => { cloudflareActions.push(`secret:${token}`); },
+        ensureDestination: async () => "verified"
       }
     });
 
@@ -306,6 +378,29 @@ describe("config and credentials", () => {
     expect(cloudflareActions).toEqual(["login"]);
     expect(savedConfig).toBeNull();
     expect(savedToken).toBeNull();
+  });
+});
+
+describe("Cloudflare destination output", () => {
+  test("distinguishes missing, pending, and verified addresses", async () => {
+    const status = (await import("../src/index")).destinationStatusFromWrangler;
+    expect(status?.("No destination addresses found.\n", "may@email.com")).toBe("missing");
+    expect(status?.(
+      "│ abc │ may@email.com │ pending              │ 2026-07-28 │\n",
+      "may@email.com"
+    )).toBe("pending");
+    expect(status?.(
+      "│ abc │ may@email.com │ 2026-07-28T08:00:00Z │ 2026-07-28 │\n",
+      "may@email.com"
+    )).toBe("verified");
+    expect(status?.(
+      "│ abc │ notmay@email.com │ 2026-07-28T08:00:00Z │ 2026-07-28 │\n",
+      "may@email.com"
+    )).toBe("missing");
+    expect(status?.(
+      "│ abc │ pending@email.com │ 2026-07-28T08:00:00Z │ 2026-07-28 │\n",
+      "pending@email.com"
+    )).toBe("verified");
   });
 });
 
@@ -337,28 +432,36 @@ async function fakeFetch(input: string | URL | Request, init?: RequestInit) {
     const query = url.searchParams.get("q");
     const status = url.searchParams.get("status");
     const domain = url.searchParams.get("domain");
+    const routed = url.searchParams.get("routed");
     return json({
       aliases: aliases.filter((record) =>
         (!query || record.alias.includes(query)) &&
         (!status || record.status === status) &&
-        (!domain || record.domain === domain)
+        (!domain || record.domain === domain) &&
+        (routed !== "true" || record.forwardTo !== null)
       )
     });
   }
 
   if (url.pathname.startsWith("/v1/aliases/") && request.method === "PATCH") {
     const [, , , domain, aliasName] = url.pathname.split("/") as [string, string, string, string, string];
-    const body = await request.json() as { status?: "active" | "blocked"; note?: string | null };
+    const body = await request.json() as {
+      status?: "active" | "blocked";
+      note?: string | null;
+      forwardTo?: string | null;
+    };
     const existing = aliases.find((record) => record.alias === aliasName && record.domain === domain);
     if (existing) {
-      existing.status = body.status ?? "active";
-      existing.note = body.note ?? null;
+      if (body.status !== undefined) existing.status = body.status;
+      if ("note" in body) existing.note = body.note ?? null;
+      if ("forwardTo" in body) existing.forwardTo = body.forwardTo ?? null;
       return json(existing);
     }
     const record = alias(aliasName!, {
       domain,
       status: body.status ?? "active",
       note: body.note ?? null,
+      forwardTo: body.forwardTo ?? null,
       emailCount: 0
     });
     aliases.push(record);
@@ -422,6 +525,7 @@ function alias(aliasName: string, fields: Partial<AliasRecord> = {}): AliasRecor
     domain: fields.domain ?? "example.com",
     status: fields.status ?? "active",
     note: fields.note ?? null,
+    forwardTo: fields.forwardTo ?? null,
     firstSeenAt: fields.firstSeenAt ?? 1781250000000,
     lastSeenAt: fields.lastSeenAt ?? 1781251200000,
     emailCount: fields.emailCount ?? 0
@@ -444,6 +548,21 @@ function email(id: string, aliasName: string, fields: Partial<EmailWithBody> = {
     hasHtml: fields.hasHtml ?? false,
     attachmentCount: fields.attachmentCount ?? 0,
     parseError: fields.parseError ?? false,
+    forwardTo: fields.forwardTo ?? null,
+    forwardError: fields.forwardError ?? null,
     textBody: "textBody" in fields ? fields.textBody! : "body"
+  };
+}
+
+function fakeCloudflareSetup() {
+  return {
+    ensureLogin: async () => { cloudflareActions.push("login"); },
+    logout: async () => { cloudflareActions.push("logout"); },
+    whoami: async () => "user@example.com\n",
+    putWorkerSecret: async (value: string) => { cloudflareActions.push(`secret:${value}`); },
+    ensureDestination: async (emailAddress: string) => {
+      cloudflareActions.push(`destination:${emailAddress}`);
+      return destinationStatus;
+    }
   };
 }

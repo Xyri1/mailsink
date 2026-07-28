@@ -3,7 +3,7 @@
 ## D-001 — Worker-owned REST API, not direct Cloudflare API access
 
 **Context.** The only reader is a CLI. It could query D1/R2 through Cloudflare's own APIs, or through an API the Worker exposes.
-**Decision.** The Worker exposes a `/v1` JSON API; the CLI talks only to it.
+**Decision.** The Worker exposes a `/v1` JSON API; mail data and alias configuration go through it. The `route` control flow may also call Wrangler to verify a Cloudflare destination address, but never reads D1 or R2 directly.
 **Rejected.** (B) Ingest-only Worker + CLI → D1 HTTP API + R2 keys: puts a Cloudflare account token and R2 credentials on every CLI machine, couples the CLI to the SQL schema, and the Worker needs D1 for the blocklist anyway — coupling kept, little code saved. (C) Queue pipeline: retries/burst capacity irrelevant at personal volume; requires Workers Paid.
 **Consequences.** ~6 routes of Worker code; one revocable bearer secret on client machines; schema stays private to the Worker; the same API can later serve agents or a UI.
 
@@ -94,7 +94,6 @@
 
 Deferred, with the trigger that would justify each:
 
-- **Per-alias forwarding / "promote"** — trigger: an alias receives mail you want in your real inbox in real time.
 - **Retention/orphan-sweep cron** — trigger: measurable junk accumulation.
 - **FTS5 search** — trigger: `LIKE` within alias partitions ever feels slow (it won't at personal scale).
 - **Attachment extraction endpoint** — trigger: first real need to pull an attachment via CLI.
@@ -104,7 +103,14 @@ Deferred, with the trigger that would justify each:
 
 ## D-016 — CLI uses task verbs and OS credential storage
 
-**Context.** The CLI needed to make common disposable-alias workflows fast without exposing Cloudflare account credentials or making users type full aliases and ULIDs.
-**Decision.** `packages/cli` is a Node/Commander client for the Worker `/v1` API, built with esbuild to `dist/index.js`. It stores only URL/default-domain config on disk, stores the API token via `@napi-rs/keyring`, supports `MAILSINK_URL`/`MAILSINK_TOKEN` for scripts, and exposes task verbs such as `latest`, `ls`, `burn`, `aliases`, `raw`, `rm`, and `purge`. `mailsink init --cloudflare` may use Wrangler's browser OAuth login during setup, but only to generate and upload the Worker's private `API_TOKEN`; `mailsink login`/`whoami`/`logout` are explicit Wrangler-session helpers. The daily CLI remains a Worker API client and does not depend on Cloudflare account credentials.
+**Context.** The CLI needed to make common disposable-alias workflows fast without making users type full aliases and ULIDs.
+**Decision.** `packages/cli` is a Node/Commander client for the Worker `/v1` API, built with esbuild to `dist/index.js`. It stores only URL/default-domain config on disk, stores the API token via `@napi-rs/keyring`, supports `MAILSINK_URL`/`MAILSINK_TOKEN` for scripts, and exposes task verbs such as `latest`, `ls`, `burn`, `route`, `aliases`, `raw`, `rm`, and `purge`. Wrangler owns Cloudflare login, Worker-secret upload, and route-destination verification; mailsink adds no Cloudflare SDK or account-token storage.
 **Rejected.** A schema-coupled D1/R2 client; plaintext token config; a low-level endpoint-shaped CLI.
 **Consequences.** The common flow is `mailsink latest netflix --from netflix`; fuzzy alias resolution stays client-side over `GET /v1/aliases`, read commands may fan out, and write commands require an unambiguous alias. Development uses pnpm scripts, and installed CLI commands run through Node.
+
+## D-017 — Per-alias routing is store-then-forward
+
+**Context.** A Cloudflare Email Routing rule for `support@example.com` would win before the catch-all Worker, so mailsink could forward the message but could not store it.
+**Decision.** Keep the Cloudflare catch-all pointed at mailsink. Store the raw message and metadata first, then call `message.forward()` when the alias has one configured `forward_to`. A destination is saved only after Wrangler reports it verified. Immediate forwarding failures are recorded on the email row and do not throw or retry inbound delivery.
+**Rejected.** Creating literal Cloudflare custom routing rules (bypasses storage); forwarding before storage (can lose the archive); a retry queue (requires more infrastructure and changes at-least-once behavior).
+**Consequences.** `mailsink route` can list a preconfigured alias before its first message. A stored message may have `forwardError`; a successful `forward()` means Cloudflare accepted the forward, not that the destination mailbox delivered it.

@@ -4,6 +4,7 @@ CREATE TABLE aliases (
   status         TEXT    NOT NULL DEFAULT 'active'
                          CHECK (status IN ('active', 'blocked')),
   note           TEXT,
+  forward_to     TEXT,
   first_seen_at  INTEGER NOT NULL,
   last_seen_at   INTEGER NOT NULL,
   email_count    INTEGER NOT NULL DEFAULT 0,
@@ -26,7 +27,9 @@ CREATE TABLE emails (
   has_html         INTEGER NOT NULL DEFAULT 0,
   attachment_count INTEGER NOT NULL DEFAULT 0,
   parse_error      INTEGER NOT NULL DEFAULT 0,
-  r2_key           TEXT    NOT NULL
+  r2_key           TEXT    NOT NULL,
+  forward_to       TEXT,
+  forward_error    TEXT
 );
 
 CREATE INDEX idx_emails_alias ON emails (alias, domain, id DESC);

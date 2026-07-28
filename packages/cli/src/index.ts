@@ -16,8 +16,8 @@ import {
   loadRuntimeConfig
 } from "./config";
 import { type Fetch, MailsinkApiError, MailsinkClient, MailsinkNetworkError } from "./client";
-import { formatAliases, formatEmailList, formatEmailWithBody } from "./format";
-import { resolveOneWriteAlias, resolveReadAliases } from "./resolve";
+import { formatAliases, formatEmailList, formatEmailWithBody, formatRoutes } from "./format";
+import { parseAliasQuery, resolveOneWriteAlias, resolveReadAliases } from "./resolve";
 import type { AliasRecord, EmailSummary, EmailWithBody } from "@mailsink/shared";
 
 interface InitAnswers {
@@ -31,6 +31,7 @@ interface CloudflareSetup {
   logout(): Promise<void>;
   whoami(): Promise<string>;
   putWorkerSecret(token: string): Promise<void>;
+  ensureDestination(email: string): Promise<"verified" | "pending">;
 }
 
 interface InitPromptMode {
@@ -230,6 +231,42 @@ function buildProgram(context: CommandContext) {
     context.stdout.push(`noted ${updated.alias}@${updated.domain}\n`);
   });
 
+  program.command("route [query] [destination]").option("--remove").action(async (query, destination, options) => {
+    const { runtime, client, globals } = await commandRuntime(program, context);
+    if (!destination && !options.remove) {
+      const parsed = query ? parseAliasQuery(query, runtime.defaultDomain, globals.domain) : null;
+      const response = await client.listAliases({
+        ...(parsed ? { q: parsed.alias, domain: parsed.domain } : { domain: globals.domain ?? runtime.defaultDomain }),
+        routed: true
+      });
+      if (globals.json) return writeJson(context, response);
+      return writeHuman(context, formatRoutes(response.aliases));
+    }
+
+    if (!query) throw new CliFailure("alias is required");
+    if (destination && options.remove) throw new CliFailure("destination and --remove cannot be used together");
+    const record = await resolveOneWriteAlias(client, query, runtime.defaultDomain, {
+      ...globals,
+      allowPreBlock: Boolean(destination)
+    });
+
+    if (options.remove) {
+      if (!record.forwardTo) throw new CliFailure(`no route configured for ${record.alias}@${record.domain}`);
+      const updated = await client.patchAlias(record.domain, record.alias, { forwardTo: null });
+      if (globals.json) return writeJson(context, updated);
+      context.stdout.push(`removed route for ${updated.alias}@${updated.domain}\n`);
+      return;
+    }
+
+    const forwardTo = destination.trim();
+    if (await context.deps.cloudflareSetup.ensureDestination(forwardTo) === "pending") {
+      throw new CliFailure(`verification pending for ${forwardTo}; verify the Cloudflare email, then rerun this command`);
+    }
+    const updated = await client.patchAlias(record.domain, record.alias, { forwardTo });
+    if (globals.json) return writeJson(context, updated);
+    context.stdout.push(`routed ${updated.alias}@${updated.domain} to ${updated.forwardTo}\n`);
+  });
+
   program.command("rm <id>").action(async (id) => {
     const { client, globals } = await commandRuntime(program, context);
     const response = await client.deleteEmail(id);
@@ -318,16 +355,17 @@ function generateApiToken() {
 
 function createWranglerCloudflareSetup(): CloudflareSetup {
   const workerDir = findWorkerDir();
-  return {
-    async ensureLogin() {
-      const whoami = await runWrangler(["whoami", "--json"]);
-      if (whoami.exitCode === 0) return;
+  const ensureLogin = async () => {
+    const whoami = await runWrangler(["whoami", "--json"]);
+    if (whoami.exitCode === 0) return;
 
-      const login = await runWrangler(["login"], { inherit: true });
-      if (login.exitCode !== 0) {
-        throw new CliFailure("Cloudflare browser login failed");
-      }
-    },
+    const login = await runWrangler(["login"], { inherit: true });
+    if (login.exitCode !== 0) {
+      throw new CliFailure("Cloudflare browser login failed");
+    }
+  };
+  return {
+    ensureLogin,
     async logout() {
       const result = await runWrangler(["logout"], { inherit: true });
       if (result.exitCode !== 0) {
@@ -346,8 +384,33 @@ function createWranglerCloudflareSetup(): CloudflareSetup {
       if (result.exitCode !== 0) {
         throw new CliFailure(`failed to upload API_TOKEN with Wrangler: ${result.stderr.trim() || result.stdout.trim()}`);
       }
+    },
+    async ensureDestination(email) {
+      await ensureLogin();
+      const listed = await runWrangler(["email", "routing", "addresses", "list", "--cwd", workerDir]);
+      if (listed.exitCode !== 0) {
+        throw new CliFailure(`failed to list Cloudflare destination addresses: ${listed.stderr.trim() || listed.stdout.trim()}`);
+      }
+      const status = destinationStatusFromWrangler(listed.stdout, email);
+      if (status !== "missing") return status;
+
+      const created = await runWrangler(["email", "routing", "addresses", "create", email, "--cwd", workerDir]);
+      if (created.exitCode !== 0) {
+        throw new CliFailure(`failed to create Cloudflare destination address: ${created.stderr.trim() || created.stdout.trim()}`);
+      }
+      return "pending";
     }
   };
+}
+
+export function destinationStatusFromWrangler(output: string, email: string): "missing" | "pending" | "verified" {
+  const target = email.toLowerCase();
+  for (const line of output.split("\n")) {
+    const columns = line.split(/[│|]/).map((column) => column.trim());
+    const emailColumn = columns.findIndex((column) => column.toLowerCase() === target);
+    if (emailColumn !== -1) return columns[emailColumn + 1]?.toLowerCase() === "pending" ? "pending" : "verified";
+  }
+  return "missing";
 }
 
 function findWorkerDir() {

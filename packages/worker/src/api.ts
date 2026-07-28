@@ -113,12 +113,14 @@ async function listAliases(url: URL, env: Env) {
     WHERE (? IS NULL OR lower(alias) LIKE '%' || lower(?) || '%')
       AND (? IS NULL OR status = ?)
       AND (? IS NULL OR domain = ?)
+      AND (? IS NULL OR forward_to IS NOT NULL)
     ORDER BY last_seen_at DESC
     LIMIT ?
   `).bind(
     valueOrNull(url.searchParams.get("q")), valueOrNull(url.searchParams.get("q")),
     valueOrNull(url.searchParams.get("status")), valueOrNull(url.searchParams.get("status")),
     lowerOrNull(url.searchParams.get("domain")), lowerOrNull(url.searchParams.get("domain")),
+    url.searchParams.get("routed") === "true" ? true : null,
     limit
   ).all<AliasRow>()).results;
 
@@ -130,29 +132,44 @@ async function patchAlias(domainParam: string, aliasParam: string, request: Requ
   const alias = normalizePathAlias(aliasParam);
   if (alias.includes("+")) return apiError("bad_request", "alias path must not contain +", 400);
 
-  const body = await request.json() as { status?: unknown; note?: unknown };
-  const status = body.status === undefined ? "active" : body.status;
-  if (status !== "active" && status !== "blocked") {
+  const body = await request.json() as { status?: unknown; note?: unknown; forwardTo?: unknown };
+  if (body.status !== undefined && body.status !== "active" && body.status !== "blocked") {
     return apiError("bad_request", "status must be active or blocked", 400);
   }
   if (body.note !== undefined && body.note !== null && typeof body.note !== "string") {
     return apiError("bad_request", "note must be a string or null", 400);
   }
+  if (body.forwardTo !== undefined && body.forwardTo !== null && (typeof body.forwardTo !== "string" || !isForwardTo(body.forwardTo.trim()))) {
+    return apiError("bad_request", "forwardTo must be an email address or null", 400);
+  }
+  const existing = await env.DB.prepare(
+    "SELECT * FROM aliases WHERE alias = ? AND domain = ?"
+  ).bind(alias, domain).first<AliasRow>();
+  const status = body.status === undefined ? existing?.status ?? "active" : body.status;
+  const note = body.note === undefined ? existing?.note ?? null : body.note;
+  const forwardTo = body.forwardTo === undefined ? existing?.forward_to ?? null : body.forwardTo === null ? null : body.forwardTo.trim();
 
   const now = Date.now();
   await env.DB.prepare(`
-    INSERT INTO aliases (alias, domain, status, note, first_seen_at, last_seen_at, email_count)
-    VALUES (?, ?, ?, ?, ?, ?, 0)
+    INSERT INTO aliases (alias, domain, status, note, forward_to, first_seen_at, last_seen_at, email_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
     ON CONFLICT(alias, domain) DO UPDATE SET
       status = excluded.status,
       note = excluded.note,
+      forward_to = excluded.forward_to,
       last_seen_at = excluded.last_seen_at
-  `).bind(alias, domain, status, body.note ?? null, now, now).run();
+  `).bind(alias, domain, status, note, forwardTo, now, now).run();
 
   const row = await env.DB.prepare(
     "SELECT * FROM aliases WHERE alias = ? AND domain = ?"
   ).bind(alias, domain).first<AliasRow>();
   return json(mapAliasRow(row!));
+}
+
+function isForwardTo(value: string) {
+  if (!value || value.length > 90 || /\s/.test(value)) return false;
+  const at = value.indexOf("@");
+  return at > 0 && at === value.lastIndexOf("@") && at < value.length - 1;
 }
 
 function valueOrNull(value: string | null) {

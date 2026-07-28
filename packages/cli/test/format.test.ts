@@ -18,7 +18,9 @@ test("formats relative times, HTML-only messages, and parse warnings", () => {
     sizeBytes: 20,
     hasHtml: false,
     attachmentCount: 0,
-    parseError: true
+    parseError: true,
+    forwardTo: null,
+    forwardError: null
   }], { now, color: false })).toMatch(/2m ago\s+!\s+netflix-x7f2@example.com\s+Sender Subject/);
 
   expect(formatEmailWithBody({
@@ -36,6 +38,10 @@ test("formats relative times, HTML-only messages, and parse warnings", () => {
     hasHtml: true,
     attachmentCount: 1,
     parseError: false,
+    forwardTo: "may@email.com",
+    forwardError: "forward unavailable",
     textBody: null
-  }, { now, color: false })).toContain("HTML-only message; mailsink raw 01K7VTNH010000000000000000 for the original");
+  }, { now, color: false })).toContain(
+    "Route: may@email.com\nForward error: forward unavailable\n\nHTML-only message; mailsink raw 01K7VTNH010000000000000000 for the original"
+  );
 });

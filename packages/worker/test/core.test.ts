@@ -29,7 +29,9 @@ describe("row mapping", () => {
       has_html: 0,
       attachment_count: 0,
       parse_error: 0,
-      r2_key: "example.com/netflix-x7f2/01J00000000000000000000000.eml"
+      r2_key: "example.com/netflix-x7f2/01J00000000000000000000000.eml",
+      forward_to: "me@example.net",
+      forward_error: null
     }, true)).toEqual({
       id: "01J00000000000000000000000",
       alias: "netflix-x7f2",
@@ -45,7 +47,9 @@ describe("row mapping", () => {
       textBody: "Your code is 123456.",
       hasHtml: false,
       attachmentCount: 0,
-      parseError: false
+      parseError: false,
+      forwardTo: "me@example.net",
+      forwardError: null
     });
   });
 
@@ -55,6 +59,7 @@ describe("row mapping", () => {
       domain: "example.com",
       status: "blocked",
       note: null,
+      forward_to: "me@example.net",
       first_seen_at: 1781251200000,
       last_seen_at: 1781251300000,
       email_count: 7
@@ -63,6 +68,7 @@ describe("row mapping", () => {
       domain: "example.com",
       status: "blocked",
       note: null,
+      forwardTo: "me@example.net",
       firstSeenAt: 1781251200000,
       lastSeenAt: 1781251300000,
       emailCount: 7

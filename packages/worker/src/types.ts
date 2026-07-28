@@ -41,6 +41,8 @@ export interface EmailRow {
   attachment_count: number;
   parse_error: number;
   r2_key: string;
+  forward_to: string | null;
+  forward_error: string | null;
 }
 
 export interface AliasRow {
@@ -48,6 +50,7 @@ export interface AliasRow {
   domain: string;
   status: "active" | "blocked";
   note: string | null;
+  forward_to: string | null;
   first_seen_at: number;
   last_seen_at: number;
   email_count: number;
