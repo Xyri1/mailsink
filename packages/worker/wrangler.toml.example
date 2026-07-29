@@ -14,3 +14,9 @@ database_id = "YOUR_DATABASE_ID"
 [[r2_buckets]]
 binding = "RAW"
 bucket_name = "mailsink-raw"
+
+[[send_email]]
+name = "EMAIL"
+
+[[queues.consumers]]
+queue = "mailsink-email-events"

@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-A catch-all email sink for domains hosted on Cloudflare, built for **disposable per-service aliases**. Sign up anywhere with an invented address (`netflix-x7f2@example.com`) — no pre-registration. Inbound mail is stored durably (raw `.eml` in R2, queryable metadata in D1) and read through a small authenticated JSON API by a CLI. Useful aliases can be routed to a verified inbox after storage; leaked aliases can be burned so future mail is rejected.
+A catch-all email sink for domains hosted on Cloudflare, built for **disposable per-service aliases**. Sign up anywhere with an invented address (`netflix-x7f2@example.com`) — no pre-registration. Inbound raw mail and versioned outbound structured JSON are durably archived in R2; D1 is the queryable index, provider-id/error, and per-recipient delivery-state store. Any authenticated agent can explicitly send from an active alias on an onboarded sending domain.
 
 ## 2. Goals
 
@@ -19,10 +19,11 @@ A catch-all email sink for domains hosted on Cloudflare, built for **disposable 
 6. Single-secret bearer auth suitable for a personal CLI.
 7. Multi-domain support with one Worker deployment.
 8. One store-then-forward destination per alias, configurable before first mail.
+9. Send/reply through Cloudflare Email Sending with durable intent and lifecycle visibility.
 
 ## 3. Non-goals
 
-Deferred to §13: full-text search, attachment extraction endpoints, webhooks/push notifications, outbound send/reply, retention/purge cron, web UI, multi-user auth, spam scoring. The CLI itself is out of scope here.
+Deferred to §13: full-text search, attachment extraction endpoints, webhooks/push notifications, retention/purge cron, web UI, multi-user auth, spam scoring. The CLI itself is out of scope here.
 
 ## 4. System overview
 
@@ -32,7 +33,8 @@ Deferred to §13: full-text search, attachment extraction endpoints, webhooks/pu
   ───────────────►      │                                    │
   Email Routing         │  email()  ── ingest pipeline ──►   │──► R2: raw .eml
   catch-all rule        │                                    │──► D1: emails, aliases
-                        │  fetch()  ── /v1 JSON API   ◄──────│◄── CLI (bearer token)
+                        │  fetch()  ── /v1 JSON API   ◄──────│◄── CLI / agents (bearer token)
+                        │  send_email() ──────────────► Email Sending
                         └────────────────────────────────────┘
 ```
 
@@ -146,6 +148,11 @@ Index notes: global listing and cursor pagination ride the `id` primary key (ULI
 
 - Bucket: `mailsink-raw`. Key: `{domain}/{alias}/{ulid}.eml`, content type `message/rfc822`.
 - Prefix-by-alias makes "nuke this alias's mail" a prefix list + batch delete, and catches orphans that D1 lost track of.
+- Sent payload: `sent/{domain}/{alias}/{send-id}.json`, versioned structured JSON, retained permanently until an explicit sent purge/delete. Mailsink never generates or stores raw MIME.
+
+### Outbound records
+
+`sent_emails` indexes `id`, `alias`, `domain`, explicit `from_addr`, subject, recipients, R2 payload key, provider `message_id`/error, and timestamps. `sent_recipients` holds one row per recipient and its latest lifecycle state. The R2 payload is canonical; D1 deliberately does not duplicate payload content. Local validation failures create no rows. A valid request is archived in transient `submitting` state before its one synchronous provider attempt; a successful provider submission becomes `accepted`. Provider failures remain archived as `failed`, but the send command/API returns failure. There is no submission Queue or retry: reuse of the same send id returns the existing record; intentional resend requires a new id. If provider acceptance cannot be recorded in D1, the API returns the send id and an unknown-outcome error; that id will not resubmit, and the operator must inspect it rather than create a new id. Cloudflare may independently retry a downstream soft bounce.
 
 ## 7. HTTP API (`fetch()` handler)
 
@@ -205,6 +212,16 @@ Response: `{ "aliases": AliasRecord[] }`.
 
 **`PATCH /v1/aliases/:domain/:alias`** — body `{ "status"?: "active" | "blocked", "note"?: string | null, "forwardTo"?: string | null }`. **Upserts**: an unknown alias is created (`email_count = 0`) for explicit pre-blocking or pre-routing. `forwardTo: null` clears a route. Server normalizes the path alias (lowercases; rejects `+` with `400`) and validates a non-null destination as one email address. Response: the full `AliasRecord`.
 
+**`GET /v1/sent`** — list sent records, newest first. Filters: exact normalized `alias`, `domain`, recipient `to`, and lifecycle `status`.
+
+**`POST /v1/sent`** — body is a versioned structured JSON send request with id, a complete `from` address, recipients, subject, and text, HTML, and/or attachments. The sender domain must be onboarded for Email Sending. The CLI may expand a local `from` with its configured default domain before calling this endpoint. Sending creates an unseen alias but rejects a blocked one. The archive is transiently `submitting`; a successful provider response has `accepted` state and `messageId`. A provider failure is archived as `failed` but returns an API failure. Acceptance is not delivery.
+
+**`GET /v1/sent/:id`** returns the record and per-recipient lifecycle; **`GET /v1/sent/:id/payload`** returns its archived JSON. **`DELETE /v1/sent/:id`** deletes one record/payload; **`DELETE /v1/sent?alias=&domain=`** purges one alias's sent archive. There is no automatic expiry.
+
+**`POST /v1/emails/:id/reply`** derives the exact inbound `toAddr`, `from`, `reply-to`, and threading headers. It replies only to the chosen reply target unless `replyAll: true`; that enables reply-all. It quotes the original by default; `quote: false` suppresses it. It never copies original attachments. The CLI maps `--all` and `--no-quote` to those fields.
+
+Delivery-event Queue consumers update `delivered`, `deferred`, `bounced`, `failed`, `rejected`, and `complained` per recipient. Unmatched events, including sends made through Gmail's Cloudflare SMTP handoff, are ignored.
+
 Design intent: `(from, to)` is the human query path and both are **filters**, not keys — `from` because real senders are unguessable ESP addresses (substring match), `to` because aliases repeat over time (latest-wins via `limit=1`). ULIDs are plumbing: the CLI carries them between `list` → `raw`/`delete`; nobody types one.
 
 ## 8. Shared contract (`packages/shared`)
@@ -259,6 +276,10 @@ export const ROUTES = {
   emails: "/v1/emails",
   email: (id: string) => `/v1/emails/${id}`,
   emailRaw: (id: string) => `/v1/emails/${id}/raw`,
+  reply: (id: string) => `/v1/emails/${id}/reply`,
+  sent: "/v1/sent",
+  sentEmail: (id: string) => `/v1/sent/${id}`,
+  sentPayload: (id: string) => `/v1/sent/${id}/payload`,
   aliases: "/v1/aliases",
   alias: (domain: string, alias: string) => `/v1/aliases/${domain}/${alias}`,
 } as const;
@@ -292,9 +313,17 @@ database_id = "<set after `wrangler d1 create`>"
 [[r2_buckets]]
 binding = "RAW"
 bucket_name = "mailsink-raw"
+
+[[send_email]]
+name = "EMAIL"
+
+[[queues.consumers]]
+queue = "mailsink-email-events"
 ```
 
-Secrets: `wrangler secret put API_TOKEN` (generate ≥32 random bytes; rotate by re-putting). Dependencies: `postal-mime`, a maintained ULID impl (e.g. `ulidx`). Migrations via `wrangler d1 migrations apply`.
+Create `mailsink-email-events` with `wrangler queues create mailsink-email-events` before the first deploy, because the Worker config declares it as a consumer. Secrets: `wrangler secret put API_TOKEN` (generate ≥32 random bytes; rotate by re-putting). Dependencies: `postal-mime`, a maintained ULID impl (e.g. `ulidx`). Migrations via `wrangler d1 migrations apply`.
+
+`mailsink setup sending [domain]` uses the default domain when omitted. After confirmation it creates or verifies `mailsink-email-events`; it never deploys or sends a test message. Domain onboarding/DNS verification, domain event subscription, Worker Queue binding, deploy, and live send remain explicit human steps.
 
 ## 10. Cloudflare setup (per domain)
 
@@ -312,11 +341,17 @@ Notes:
 - **Subaddressing toggle (Email Routing → Settings): leave it at its default (off).** The Worker's `+` folding (§5.1) works either way — unmatched recipients reach the catch-all with `message.to` verbatim. The toggle only changes explicit rules: when on, `realuser+foo@` matches the `realuser@` rule and routes to the real inbox instead of the sink. Either state is coherent; this spec assumes the default (off), which means `+` variants of real addresses fall through to the sink too. Turn it on if you'd rather have `realuser+foo@` follow `realuser@`'s forwarding.
 - **Renaming the Worker severs its binding to the catch-all rule** — re-select the Worker in each domain's catch-all rule after a rename.
 
+### Sending setup
+
+Sending domains are onboarded separately from Email Routing. In **Compute > Email Service > Email Sending**, follow [Cloudflare Email Sending](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/) to publish/verify the generated `cf-bounce` MX, SPF, and DKIM records, create a domain Queue event subscription, bind it to the Worker, and deploy. Never replace an existing DMARC record; use `p=none` during validation. Leave Email Preview enabled at first—on new domains it retains message content for roughly seven days. The user must confirm before deployment or any live send.
+
 ## 11. Operational limits & cost
 
 - Inbound message cap: **25 MiB** (Email Routing). Larger mail is rejected upstream of the Worker.
 - **Workers free plan CPU** can be exceeded parsing very large MIME (big attachments). Sign-up mail is KBs and safe. A CPU-killed handler surfaces as an SMTP transient → sender retries → eventually bounces; the fix, if it ever bites, is Workers Paid ($5/mo).
-- Quotas at personal scale: R2 free 10 GB, D1 free 5 GB, Workers free 100k req/day — years of headroom. Expected cost: **$0**.
+- Inbound storage can fit free tiers. Email Sending is [public beta](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/): arbitrary-recipient sending needs Workers Paid, includes 3,000 messages/month, then costs $0.35/1,000. Daily quotas are adaptive and unpublished.
+- Email Sending limits: 50 recipients/message, 5 MiB message, 32 attachments, and 16 KB headers.
+- `messageId` means Cloudflare accepted/queued the send, not delivered or received. A live gate is: R2/D1 archive, provider id, terminal Queue event, CLI status, mailbox receipt, and SPF/DKIM/DMARC results.
 - **Upstream filtering:** before rule matching, Cloudflare rejects mail that fails the sender's DMARC policy and mail from RBL-listed IPs. The sink never sees that traffic (fine — it's spam suppression for free), and any end-to-end test mail must come from a DMARC-passing sender or it dies before the Worker runs.
 - Privacy note: `BLOCK_MODE=reject` confirms an address exists-but-refuses; with a catch-all, every address "exists" anyway, so the leak is nil. `drop` is available if you'd rather spammers see success.
 
@@ -332,7 +367,8 @@ curl -X POST "http://localhost:8787/cdn-cgi/handler/email?from=noreply@em.netfli
 ```
 
 - Fixtures: a small `.eml` corpus — plain text, multipart+HTML, attachment-bearing, and one deliberately malformed message.
-- **One-time platform verification (against a real deployment, before trusting §5.8):** the SMTP behaviors the design leans on are observed, not documented. Send real mail (from a DMARC-passing sender, per §11) and confirm: (a) a deliberately thrown handler exception produces a *transient* 4xx at the sender (retry, not bounce); (b) returning without action drops the message silently; (c) `setReject` produces a permanent 5xx. Record the observed SMTP codes in DECISIONS.md.
+- **One-time inbound platform verification (against a real deployment, before trusting §5.8):** send real mail (from a DMARC-passing sender, per §11) and confirm: (a) a deliberately thrown handler exception produces a *transient* 4xx at the sender (retry, not bounce); (b) returning without action drops the message silently; (c) `setReject` produces a permanent 5xx. Record observed SMTP codes in DECISIONS.md.
+- **Outbound local/remote:** the local Email Sending binding simulates; `remote=true` sends real mail. Never use the latter without confirmation. Verify provider acceptance, per-recipient Queue terminal events, CLI state, and mailbox/authentication separately.
 
 ## 13. Deferred features
 
@@ -340,4 +376,3 @@ curl -X POST "http://localhost:8787/cdn-cgi/handler/email?from=noreply@em.netfli
 - Full-text search (D1 FTS5) if `LIKE` ever feels slow.
 - Attachment extraction endpoint (parse on read from `.eml`).
 - Push (webhook/Telegram) on arrival for watched aliases.
-- Outbound reply via Email Sending, if a disposable identity ever needs to answer. (Needs Workers Paid + the `nodejs_compat` compatibility flag for `mimetext`; `message.reply()` also requires the inbound mail to have a valid DMARC result.)

@@ -1,7 +1,11 @@
 From: Netflix <no-reply@em.netflix.com>
 To: netflix-x7f2@example.com
+Cc: watcher@example.net
+Reply-To: Netflix Replies <replies@em.netflix.com>
 Subject: Your sign-in code
 Date: Fri, 12 Jun 2026 08:00:00 +0000
+Message-ID: <plain-1@em.netflix.com>
+References: <older@em.netflix.com>
 Content-Type: text/plain; charset=utf-8
 
 Your code is 123456.

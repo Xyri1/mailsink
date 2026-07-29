@@ -1,5 +1,5 @@
-import type { AliasRecord, EmailSummary, EmailWithBody } from "@mailsink/shared";
-import type { AliasRow, EmailRow } from "./types";
+import type { AliasRecord, EmailSummary, EmailWithBody, SentEmailSummary, SentRecipient } from "@mailsink/shared";
+import type { AliasRow, EmailRow, SentEmailRow, SentRecipientRow } from "./types";
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -62,6 +62,33 @@ export function mapAliasRow(row: AliasRow): AliasRecord {
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
     emailCount: row.email_count
+  };
+}
+
+export function mapSentEmailRow(row: SentEmailRow): SentEmailSummary {
+  return {
+    id: row.id,
+    alias: row.alias,
+    domain: row.domain,
+    fromAddr: row.from_addr,
+    subject: row.subject,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    status: row.status,
+    messageId: row.message_id,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
+    recipientCount: row.recipient_count
+  };
+}
+
+export function mapSentRecipientRow(row: SentRecipientRow): SentRecipient {
+  return {
+    email: row.email,
+    kind: row.kind,
+    status: row.status,
+    updatedAt: row.updated_at,
+    detail: row.detail
   };
 }
 

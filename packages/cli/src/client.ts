@@ -3,8 +3,12 @@ import type {
   ApiError,
   DeleteResponse,
   EmailWithBody,
+  ListSentEmailsResponse,
   ListAliasesResponse,
-  ListEmailsResponse
+  ListEmailsResponse,
+  ReplyEmailRequest,
+  SendEmailRequest,
+  SentEmail
 } from "@mailsink/shared";
 import { ROUTES } from "@mailsink/shared";
 
@@ -67,6 +71,34 @@ export class MailsinkClient {
 
   deleteEmailsByAlias(alias: string, domain: string) {
     return this.request<DeleteResponse>("DELETE", ROUTES.emails, { alias, domain });
+  }
+
+  sendEmail(body: SendEmailRequest) {
+    return this.request<SentEmail>("POST", ROUTES.sent, {}, body);
+  }
+
+  replyEmail(inboundId: string, body: ReplyEmailRequest) {
+    return this.request<SentEmail>("POST", ROUTES.reply(encodeURIComponent(inboundId)), {}, body);
+  }
+
+  listSentEmails(params: { alias?: string; domain?: string; to?: string; status?: string; limit?: number; cursor?: string } = {}) {
+    return this.request<ListSentEmailsResponse>("GET", ROUTES.sent, params);
+  }
+
+  getSentEmail(id: string) {
+    return this.request<SentEmail>("GET", ROUTES.sentEmail(encodeURIComponent(id)));
+  }
+
+  getSentPayload(id: string) {
+    return this.request<SendEmailRequest>("GET", ROUTES.sentPayload(encodeURIComponent(id)));
+  }
+
+  deleteSentEmail(id: string) {
+    return this.request<DeleteResponse>("DELETE", ROUTES.sentEmail(encodeURIComponent(id)));
+  }
+
+  deleteSentEmailsByAlias(alias: string, domain: string) {
+    return this.request<DeleteResponse>("DELETE", ROUTES.sent, { alias, domain });
   }
 
   private async request<T>(method: string, path: string, query: Record<string, unknown> = {}, body?: unknown): Promise<T> {

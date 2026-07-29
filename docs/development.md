@@ -60,6 +60,8 @@ Put command arguments after `dev`.
 pnpm --dir packages/cli run dev latest docs-test
 ```
 
+Local Email Sending bindings simulate submission. They do not send real mail; `remote=true` does. Do not use remote mode or a live test send without confirmation. A live check needs the archived R2/D1 record, provider `messageId`, terminal Queue event, CLI status, mailbox receipt, and SPF/DKIM/DMARC verification.
+
 ## Build the CLI
 
 Build the Node.js entry point.
@@ -89,4 +91,3 @@ If you change the shared API contract, update these parts:
 4. Update the related tests.
 5. Run `pnpm test`.
 6. Run `pnpm run typecheck`.
-

@@ -25,7 +25,7 @@ Use pnpm and Node.js.
 ## Preserve the design
 
 - Keep the CLI a task-verb client for the Worker `/v1` API.
-- Keep normal mail commands independent of D1, R2, and Cloudflare account APIs.
+- Keep normal mail commands independent of direct D1, R2, and Cloudflare account APIs.
 - Use Wrangler only for `login`, `logout`, `whoami`, and Cloudflare-assisted initialization.
 - Keep non-secret URL and default-domain values in the config file.
 - Keep the API token in the OS credential store through `@napi-rs/keyring`.
@@ -54,7 +54,7 @@ Run repository-local commands from the repository root:
 ```bash
 pnpm --dir packages/cli run dev --help
 pnpm --dir packages/cli run dev latest netflix --from netflix
-pnpm --dir packages/cli run dev ls netflix --limit 10
+pnpm --dir packages/cli run dev ls inbox netflix --from netflix
 ```
 
 Use `mailsink ...` only when testing an installed package.

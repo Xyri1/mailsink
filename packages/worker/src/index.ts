@@ -1,6 +1,6 @@
-import { handleFetch } from "./api";
+import { handleDeliveryEvents, handleFetch } from "./api";
 import { handleEmail, type ForwardableEmailMessageLike } from "./ingest";
-import type { Env } from "./types";
+import type { Env, QueueBatch } from "./types";
 
 export default {
   fetch(request: Request, env: Env) {
@@ -9,5 +9,9 @@ export default {
 
   email(message: ForwardableEmailMessageLike, env: Env) {
     return handleEmail(message, env);
+  },
+
+  queue(batch: QueueBatch<unknown>, env: Env) {
+    return handleDeliveryEvents(batch, env);
   }
 };

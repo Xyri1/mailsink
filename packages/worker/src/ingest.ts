@@ -24,6 +24,12 @@ interface ParsedMetadata {
   hasHtml: number;
   attachmentCount: number;
   parseError: number;
+  htmlBody: string | null;
+  messageId: string | null;
+  replyTo: string | null;
+  referencesHeader: string | null;
+  toHeader: string | null;
+  ccHeader: string | null;
 }
 
 export async function handleEmail(message: ForwardableEmailMessageLike, env: Env) {
@@ -50,8 +56,9 @@ export async function handleEmail(message: ForwardableEmailMessageLike, env: Env
       INSERT INTO emails (
         id, alias, domain, to_addr, envelope_from, from_addr, from_name, subject,
         date_header, received_at, size_bytes, text_body, has_html, attachment_count,
-        parse_error, r2_key, forward_to
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parse_error, r2_key, forward_to, html_body, message_id, reply_to,
+        references_header, to_header, cc_header
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       id,
       recipient.alias,
@@ -69,7 +76,13 @@ export async function handleEmail(message: ForwardableEmailMessageLike, env: Env
       metadata.attachmentCount,
       metadata.parseError,
       r2Key,
-      alias?.forward_to ?? null
+      alias?.forward_to ?? null,
+      metadata.htmlBody,
+      metadata.messageId,
+      metadata.replyTo,
+      metadata.referencesHeader,
+      metadata.toHeader,
+      metadata.ccHeader
     ),
     env.DB.prepare(`
       INSERT INTO aliases (alias, domain, status, note, first_seen_at, last_seen_at, email_count)
@@ -106,7 +119,16 @@ async function parseSafely(buffer: ArrayBuffer, envelopeFrom: string): Promise<P
       textBody: parsed.text ? parsed.text.slice(0, TEXT_LIMIT) : null,
       hasHtml: parsed.html ? 1 : 0,
       attachmentCount: parsed.attachments?.length ?? 0,
-      parseError: 0
+      parseError: 0,
+      htmlBody: parsed.html ? parsed.html.slice(0, TEXT_LIMIT) : null,
+      messageId: parsed.messageId || null,
+      replyTo: parsed.replyTo?.length ? JSON.stringify(parsed.replyTo.map((address) => ({
+        email: address.address,
+        ...(address.name ? { name: address.name } : {})
+      }))) : null,
+      referencesHeader: parsed.references || null,
+      toHeader: parsed.to?.length ? JSON.stringify(parsed.to.map((address) => address.address)) : null,
+      ccHeader: parsed.cc?.length ? JSON.stringify(parsed.cc.map((address) => address.address)) : null
     };
   } catch {
     return {
@@ -117,7 +139,13 @@ async function parseSafely(buffer: ArrayBuffer, envelopeFrom: string): Promise<P
       textBody: null,
       hasHtml: 0,
       attachmentCount: 0,
-      parseError: 1
+      parseError: 1,
+      htmlBody: null,
+      messageId: null,
+      replyTo: null,
+      referencesHeader: null,
+      toHeader: null,
+      ccHeader: null
     };
   }
 }

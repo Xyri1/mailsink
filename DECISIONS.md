@@ -98,13 +98,12 @@ Deferred, with the trigger that would justify each:
 - **FTS5 search** — trigger: `LIKE` within alias partitions ever feels slow (it won't at personal scale).
 - **Attachment extraction endpoint** — trigger: first real need to pull an attachment via CLI.
 - **Push notifications (webhook/Telegram)** — trigger: a watched-alias use case appears.
-- **Outbound reply (Email Sending)** — trigger: a disposable identity needs to answer, not just receive.
 - **Web UI / multi-user** — trigger: a second human user, which is a different product.
 
 ## D-016 — CLI uses task verbs and OS credential storage
 
 **Context.** The CLI needed to make common disposable-alias workflows fast without making users type full aliases and ULIDs.
-**Decision.** `packages/cli` is a Node/Commander client for the Worker `/v1` API, built with esbuild to `dist/index.js`. It stores only URL/default-domain config on disk, stores the API token via `@napi-rs/keyring`, supports `MAILSINK_URL`/`MAILSINK_TOKEN` for scripts, and exposes task verbs such as `latest`, `ls`, `burn`, `route`, `aliases`, `raw`, `rm`, and `purge`. Wrangler owns Cloudflare login, Worker-secret upload, and route-destination verification; mailsink adds no Cloudflare SDK or account-token storage.
+**Decision.** `packages/cli` is a Node/Commander client for the Worker `/v1` API, built with esbuild to `dist/index.js`. It stores only URL/default-domain config on disk, stores the API token via `@napi-rs/keyring`, supports `MAILSINK_URL`/`MAILSINK_TOKEN` for scripts, and exposes task verbs including `send`, `reply`, `ls inbox`, `ls sent`, and `payload`. Wrangler owns Cloudflare login, Worker-secret upload, and route-destination verification; mailsink adds no Cloudflare SDK or account-token storage.
 **Rejected.** A schema-coupled D1/R2 client; plaintext token config; a low-level endpoint-shaped CLI.
 **Consequences.** The common flow is `mailsink latest netflix --from netflix`; fuzzy alias resolution stays client-side over `GET /v1/aliases`, read commands may fan out, and write commands require an unambiguous alias. Development uses pnpm scripts, and installed CLI commands run through Node.
 
@@ -114,3 +113,18 @@ Deferred, with the trigger that would justify each:
 **Decision.** Keep the Cloudflare catch-all pointed at mailsink. Store the raw message and metadata first, then call `message.forward()` when the alias has one configured `forward_to`. A destination is saved only after Wrangler reports it verified. Immediate forwarding failures are recorded on the email row and do not throw or retry inbound delivery.
 **Rejected.** Creating literal Cloudflare custom routing rules (bypasses storage); forwarding before storage (can lose the archive); a retry queue (requires more infrastructure and changes at-least-once behavior).
 **Consequences.** `mailsink route` can list a preconfigured alias before its first message. A stored message may have `forwardError`; a successful `forward()` means Cloudflare accepted the forward, not that the destination mailbox delivered it.
+
+## D-018 — Archive structured sends; do not retry submission
+
+**Decision.** Archive a versioned structured JSON payload permanently in R2 and a searchable/provider/lifecycle index in D1 before one synchronous Email Sending attempt. Start transiently at `submitting`, then become `accepted` on provider success; never generate raw MIME, enqueue submission, or retry it. A repeated send id returns the existing record; a deliberate resend gets a new id. Local validation failures are unarchived; provider failures are archived as `failed` and returned as failures.
+**Consequences.** Intent and failure are durable without duplicate mail from retries. Cloudflare's accepted `messageId` and downstream retry behavior remain distinct from delivery. Email Sending and D1 cannot commit atomically: if recording acceptance fails, the API reports the send id as an unknown outcome and that id remains non-resubmittable.
+
+## D-019 — Explicit identities and event-driven delivery state
+
+**Decision.** Every send declares `from`. The CLI expands local parts with its default domain; the Worker API requires full addresses on onboarded sending domains. Unseen aliases are created; blocked aliases cannot send. A Queue subscription updates recipient lifecycle; unmatched events are ignored.
+**Consequences.** Any bearer-token holder can send to any address, with no custom rate limit. `accepted`, `delivered`, and mailbox receipt are separate states.
+
+## D-020 — Gmail is an SMTP handoff, not a mailsink send
+
+**Decision.** `route` remains inbound-only. `provider gmail` prints Cloudflare SMTP “Send mail as” settings (`smtp.mx.cloudflare.net`, 465, implicit TLS, `api_token`, alias address) and requires a human-managed Email Sending:Edit token, which it never receives.
+**Consequences.** Gmail-originated messages bypass the mailsink sent archive and are not matched to delivery events.

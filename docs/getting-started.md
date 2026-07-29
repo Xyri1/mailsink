@@ -54,6 +54,12 @@ Create the R2 bucket.
 npx wrangler r2 bucket create mailsink-raw
 ```
 
+Create the Queue declared by the Worker configuration.
+
+```bash
+npx wrangler queues create mailsink-email-events
+```
+
 Apply the database migration.
 
 ```bash
@@ -119,6 +125,18 @@ pnpm run dev latest docs-test
 ```
 
 If the command shows the message, the setup is complete.
+
+## 7. Enable outbound sending (optional, confirmation required)
+
+Do not deploy or send a live test without your confirmation. Start the guided setup:
+
+```bash
+mailsink setup sending [domain]
+```
+
+It uses the configured default domain if omitted. After confirmation, it verifies the `mailsink-email-events` Queue (or creates it for an upgraded deployment). In **Compute > Email Service > Email Sending**, separately onboard the sending domain, publish/verify its `cf-bounce` MX, SPF, and DKIM records, create its domain event subscription, bind the Queue to the Worker, and deploy. Those dashboard steps and any live send remain human actions. Do not overwrite an existing DMARC record; use `p=none` during validation. Keep Email Preview enabled initially (it retains content on new domains for about seven days).
+
+Before declaring a live send complete, confirm: R2/D1 archive rows, the provider `messageId`, a terminal Queue event, `mailsink ls sent` status, mailbox receipt, and SPF/DKIM/DMARC results.
 
 ## Next steps
 

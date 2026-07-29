@@ -1,5 +1,5 @@
 import pc from "picocolors";
-import type { AliasRecord, EmailSummary, EmailWithBody } from "@mailsink/shared";
+import type { AliasRecord, EmailSummary, EmailWithBody, SendEmailRequest, SentEmail, SentEmailSummary } from "@mailsink/shared";
 
 interface FormatOptions {
   now: number;
@@ -53,6 +53,28 @@ export function formatRoutes(aliases: AliasRecord[]) {
   return aliases.length === 0 ? "no routes configured" : aliases.map((record) =>
     `${record.alias}@${record.domain} -> ${record.forwardTo}${record.status === "blocked" ? " (blocked)" : ""}`
   ).join("\n");
+}
+
+export function formatSentEmailList(emails: SentEmailSummary[], options: FormatOptions) {
+  return emails.map((email) => [
+    paint(options).dim(relativeTime(email.createdAt, options.now)).padEnd(8),
+    `${email.alias}@${email.domain}`.padEnd(28),
+    email.status.padEnd(10),
+    email.subject
+  ].join(" ")).join("\n");
+}
+
+export function formatSentEmailWithBody(email: SentEmail, payload: SendEmailRequest) {
+  const lines = [
+    `From: ${email.fromAddr}`,
+    ...email.recipients.map((recipient) => `${recipient.kind[0]!.toUpperCase()}${recipient.kind.slice(1)}: ${recipient.email} (${recipient.status}${recipient.detail ? `: ${recipient.detail}` : ""})`),
+    `Subject: ${email.subject}`,
+    `Status: ${email.status}`,
+    ""
+  ];
+  if (payload.text !== undefined) lines.push(payload.text);
+  else if (payload.html !== undefined) lines.push("HTML-only message");
+  return lines.join("\n");
 }
 
 export function relativeTime(value: number, now: number) {

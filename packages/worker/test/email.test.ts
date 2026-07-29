@@ -79,7 +79,12 @@ describe("email ingest", () => {
       subject: "Your sign-in code",
       has_html: 0,
       attachment_count: 0,
-      parse_error: 0
+      parse_error: 0,
+      message_id: "<plain-1@em.netflix.com>",
+      reply_to: JSON.stringify([{ email: "replies@em.netflix.com", name: "Netflix Replies" }]),
+      references_header: "<older@em.netflix.com>",
+      to_header: JSON.stringify(["netflix-x7f2@example.com"]),
+      cc_header: JSON.stringify(["watcher@example.net"])
     });
     expect(String(row?.text_body).trim()).toBe("Your code is 123456.");
     expect(env.DB.aliases.get(env.DB.aliasKey("netflix-x7f2", "example.com"))?.email_count).toBe(1);

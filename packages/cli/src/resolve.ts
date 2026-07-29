@@ -12,8 +12,9 @@ export interface AliasQuery {
 export function parseAliasQuery(query: string, defaultDomain: string, domainOverride?: string): AliasQuery {
   const [alias, inlineDomain, extra] = query.split("@");
   if (!alias || extra !== undefined) throw new CliFailure(`invalid alias query ${query}`);
-  const domain = domainOverride ?? inlineDomain ?? defaultDomain;
-  return { alias, domain, explicit: inlineDomain !== undefined, label: `${alias}@${domain}` };
+  const normalizedAlias = alias.toLowerCase();
+  const domain = (domainOverride ?? inlineDomain ?? defaultDomain).toLowerCase();
+  return { alias: normalizedAlias, domain, explicit: inlineDomain !== undefined, label: `${normalizedAlias}@${domain}` };
 }
 
 export async function resolveReadAliases(

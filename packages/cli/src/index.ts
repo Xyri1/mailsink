@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from "commander";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { readFile as readFileFromFd } from "node:fs";
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
 import {
@@ -16,9 +17,9 @@ import {
   loadRuntimeConfig
 } from "./config";
 import { type Fetch, MailsinkApiError, MailsinkClient, MailsinkNetworkError } from "./client";
-import { formatAliases, formatEmailList, formatEmailWithBody, formatRoutes } from "./format";
+import { formatAliases, formatEmailList, formatEmailWithBody, formatRoutes, formatSentEmailList, formatSentEmailWithBody } from "./format";
 import { parseAliasQuery, resolveOneWriteAlias, resolveReadAliases } from "./resolve";
-import type { AliasRecord, EmailSummary, EmailWithBody } from "@mailsink/shared";
+import type { AliasRecord, EmailSummary, EmailWithBody, ReplyEmailRequest, SendEmailRequest } from "@mailsink/shared";
 
 interface InitAnswers {
   url: string;
@@ -32,6 +33,7 @@ interface CloudflareSetup {
   whoami(): Promise<string>;
   putWorkerSecret(token: string): Promise<void>;
   ensureDestination(email: string): Promise<"verified" | "pending">;
+  ensureQueue?(name: string): Promise<void>;
 }
 
 interface InitPromptMode {
@@ -47,7 +49,9 @@ export interface CliDeps {
   prompts?: (mode: InitPromptMode) => Promise<InitAnswers>;
   confirm?: (message: string) => Promise<boolean>;
   writeFile?: (path: string, data: string) => Promise<void>;
+  readFile?: (path: string | number) => Promise<string>;
   generateToken?: () => string;
+  generateId?: () => string;
   cloudflareSetup?: CloudflareSetup;
 }
 
@@ -74,7 +78,9 @@ export async function runCli(args: string[], deps: CliDeps = {}): Promise<CliRes
       prompts: deps.prompts ?? promptInit,
       confirm: deps.confirm ?? confirmPrompt,
       writeFile: deps.writeFile ?? writeFile,
+      readFile: deps.readFile ?? readRequestFile,
       generateToken: deps.generateToken ?? generateApiToken,
+      generateId: deps.generateId ?? randomUUID,
       cloudflareSetup: deps.cloudflareSetup ?? createWranglerCloudflareSetup()
     },
     stdout: [],
@@ -155,7 +161,8 @@ function buildProgram(context: CommandContext) {
     writeHuman(context, found.map((message) => `${message.alias}@${message.domain}\n${formatEmailWithBody(message, formatOptions(context))}`).join("\n\n"));
   });
 
-  program.command("ls [query]").option("--from <sender>").option("--limit <n>").action(async (query, options) => {
+  const ls = program.command("ls");
+  ls.command("inbox [alias]").option("--from <sender>").option("--limit <n>").action(async (query, options) => {
     const { runtime, client, globals } = await commandRuntime(program, context);
     const limit = parseLimit(options.limit, 20);
     let emails: EmailSummary[];
@@ -177,11 +184,83 @@ function buildProgram(context: CommandContext) {
     writeHuman(context, formatEmailList(emails, formatOptions(context)));
   });
 
+  ls.command("sent [alias]").option("--to <recipient>").option("--status <state>").option("--limit <n>").action(async (query, options) => {
+    const { runtime, client, globals } = await commandRuntime(program, context);
+    const limit = parseLimit(options.limit, 20);
+    const parsed = query ? parseAliasQuery(query, runtime.defaultDomain, globals.domain) : null;
+    const response = await client.listSentEmails({
+      ...(parsed ? { alias: parsed.alias, domain: parsed.domain } : { domain: globals.domain ?? runtime.defaultDomain }),
+      to: options.to,
+      status: options.status,
+      limit
+    });
+    if (globals.json) return writeJson(context, response);
+    writeHuman(context, formatSentEmailList(response.emails, formatOptions(context)));
+  });
+
+  program.command("send [recipients...]")
+    .option("--from <alias|address>")
+    .option("--subject <subject>")
+    .option("--text <text>")
+    .option("--request <file|->")
+    .action(async (recipients: string[], options) => {
+      const { runtime, client, globals } = await commandRuntime(program, context);
+      const request = options.request
+        ? await readSendRequest(context, options.request, runtime.defaultDomain, globals.domain)
+        : commonSendRequest(recipients, options as { from?: string; subject?: string; text?: string }, runtime.defaultDomain, globals.domain, context.deps.generateId);
+      let sent;
+      try {
+        sent = await client.sendEmail(request);
+      } catch (error) {
+        throw new CliFailure(`${formatError(error)}; send id ${request.id}`);
+      }
+      if (globals.json) return writeJson(context, sent);
+      context.stdout.push(`sent ${sent.id}\n`);
+    });
+
+  program.command("reply <inbound-id>")
+    .requiredOption("--text <text>")
+    .option("--html <html>")
+    .option("--all")
+    .option("--no-quote")
+    .action(async (inboundId, options) => {
+      const { client, globals } = await commandRuntime(program, context);
+      const request: ReplyEmailRequest = {
+        version: 1,
+        id: context.deps.generateId(),
+        text: options.text,
+        ...(options.html === undefined ? {} : { html: options.html }),
+        ...(options.all ? { replyAll: true } : {}),
+        ...(options.quote === false ? { quote: false } : {})
+      };
+      let sent;
+      try {
+        sent = await client.replyEmail(inboundId, request);
+      } catch (error) {
+        throw new CliFailure(`${formatError(error)}; send id ${request.id}`);
+      }
+      if (globals.json) return writeJson(context, sent);
+      context.stdout.push(`sent ${sent.id}\n`);
+    });
+
   program.command("show <id>").action(async (id) => {
     const { client, globals } = await commandRuntime(program, context);
-    const email = await client.getEmail(id);
-    if (globals.json) return writeJson(context, email);
-    writeHuman(context, formatEmailWithBody(email, formatOptions(context)));
+    try {
+      const email = await client.getEmail(id);
+      if (globals.json) return writeJson(context, email);
+      return writeHuman(context, formatEmailWithBody(email, formatOptions(context)));
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+    const sent = await client.getSentEmail(id);
+    if (globals.json) return writeJson(context, sent);
+    const payload = await client.getSentPayload(id);
+    writeHuman(context, formatSentEmailWithBody(sent, payload));
+  });
+
+  program.command("payload <sent-id>").action(async (id) => {
+    const { client } = await commandRuntime(program, context);
+    writeJson(context, await client.getSentPayload(id));
   });
 
   program.command("raw <id>").option("-o, --output <file>").action(async (id, options) => {
@@ -269,12 +348,19 @@ function buildProgram(context: CommandContext) {
 
   program.command("rm <id>").action(async (id) => {
     const { client, globals } = await commandRuntime(program, context);
-    const response = await client.deleteEmail(id);
+    let response;
+    try {
+      response = await client.deleteEmail(id);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      response = await client.deleteSentEmail(id);
+    }
     if (globals.json) return writeJson(context, response);
     context.stdout.push(`deleted ${response.deleted} email\n`);
   });
 
-  program.command("purge <alias>").option("--yes").action(async (query, options) => {
+  const purge = program.command("purge");
+  purge.command("inbox <alias>").option("--yes").action(async (query, options) => {
     const { runtime, client, globals } = await commandRuntime(program, context);
     const record = await resolveOneWriteAlias(client, query, runtime.defaultDomain, globals);
     if (!options.yes && !await context.deps.confirm(`Delete all mail for ${record.alias}@${record.domain}?`)) {
@@ -283,6 +369,50 @@ function buildProgram(context: CommandContext) {
     const response = await client.deleteEmailsByAlias(record.alias, record.domain);
     if (globals.json) return writeJson(context, response);
     context.stdout.push(`deleted ${response.deleted} emails from ${record.alias}@${record.domain}\n`);
+  });
+
+  purge.command("sent <alias>").option("--yes").action(async (query, options) => {
+    const { runtime, client, globals } = await commandRuntime(program, context);
+    const record = parseAliasQuery(query, runtime.defaultDomain, globals.domain);
+    if (!options.yes && !await context.deps.confirm(`Delete all sent mail from ${record.label}?`)) {
+      throw new CliFailure("cancelled");
+    }
+    const response = await client.deleteSentEmailsByAlias(record.alias, record.domain);
+    if (globals.json) return writeJson(context, response);
+    context.stdout.push(`deleted ${response.deleted} sent email${response.deleted === 1 ? "" : "s"} from ${record.label}\n`);
+  });
+
+  const setup = program.command("setup");
+  setup.command("sending [domain]").action(async (domain) => {
+    const { runtime } = await commandRuntime(program, context);
+    const sendingDomain = domain ?? runtime.defaultDomain;
+    if (!await context.deps.confirm(`Set up outbound sending for ${sendingDomain}?`)) throw new CliFailure("cancelled");
+    await context.deps.cloudflareSetup.ensureLogin();
+    if (!context.deps.cloudflareSetup.ensureQueue) throw new CliFailure("Cloudflare queue setup is unavailable");
+    await context.deps.cloudflareSetup.ensureQueue("mailsink-email-events");
+    writeHuman(context, [
+      `Queue mailsink-email-events is ready for ${sendingDomain}.`,
+      "In the Cloudflare dashboard, open Compute > Email Service > Email Sending > Domains, add this sending domain, and publish and verify its DNS records.",
+      "Then open Compute > Email Service > Email Sending > Event subscriptions, create a domain-scoped subscription for this domain, and select mailsink-email-events.",
+      "Add DMARC only if no record exists; start with p=none and do not overwrite an existing DMARC record.",
+      "Email Preview is retained for roughly seven days. Verify Worker queue configuration and deploy your Worker before use.",
+      `Run a controlled test when ready: mailsink send recipient@example.com --from sender@${sendingDomain} --subject test --text test`
+    ].join("\n"));
+  });
+
+  const provider = program.command("provider");
+  provider.command("gmail <alias>").action(async (query) => {
+    const { runtime, client, globals } = await commandRuntime(program, context);
+    const record = await resolveOneWriteAlias(client, query, runtime.defaultDomain, globals);
+    if (!record.forwardTo || !/@(?:gmail|googlemail)\.com$/i.test(record.forwardTo)) {
+      throw new CliFailure(`a Gmail route is required for ${record.alias}@${record.domain}`);
+    }
+    writeHuman(context, [
+      `Use Cloudflare SMTP with Gmail Send mail for ${record.alias}@${record.domain}.`,
+      `SMTP host smtp.mx.cloudflare.net, port 465, implicit TLS, username api_token, and selected alias ${record.alias}@${record.domain}.`,
+      "Create the Cloudflare SMTP token manually in the dashboard; mailsink never reads, stores, or prints it.",
+      "Gmail-sent mail bypasses mailsink and does not appear in mailsink ls sent."
+    ].join("\n"));
   });
 
   return program;
@@ -311,6 +441,53 @@ function parseLimit(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) throw new CliFailure("limit must be a positive integer");
   return parsed;
+}
+
+function commonSendRequest(
+  recipients: string[],
+  options: { from?: string; subject?: string; text?: string },
+  defaultDomain: string,
+  domain: string | undefined,
+  generateId: () => string
+): SendEmailRequest {
+  if (recipients.length === 0) throw new CliFailure("at least one recipient is required");
+  if (!options.from) throw new CliFailure("from is required");
+  if (!options.subject) throw new CliFailure("subject is required");
+  if (options.text === undefined) throw new CliFailure("text is required");
+  return {
+    version: 1,
+    id: generateId(),
+    from: parseAliasQuery(options.from, defaultDomain, domain).label,
+    to: recipients,
+    subject: options.subject,
+    text: options.text
+  };
+}
+
+async function readSendRequest(context: CommandContext, file: string, defaultDomain: string, domain?: string): Promise<SendEmailRequest> {
+  try {
+    const request = JSON.parse(await context.deps.readFile(file === "-" ? 0 : file)) as SendEmailRequest;
+    request.id ??= context.deps.generateId();
+    if (typeof request.from === "string") {
+      request.from = parseAliasQuery(request.from, defaultDomain, domain).label;
+    } else {
+      request.from = { ...request.from, email: parseAliasQuery(request.from.email, defaultDomain, domain).label };
+    }
+    return request;
+  } catch (error) {
+    throw new CliFailure(`invalid send request: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function isNotFound(error: unknown) {
+  return error instanceof MailsinkApiError && error.status === 404;
+}
+
+function readRequestFile(path: string | number): Promise<string> {
+  if (typeof path === "string") return readFile(path, "utf8");
+  return new Promise((resolve, reject) => {
+    readFileFromFd(path, "utf8", (error, data) => error ? reject(error) : resolve(data));
+  });
 }
 
 function formatOptions(context: CommandContext) {
@@ -353,13 +530,13 @@ function generateApiToken() {
   return randomBytes(32).toString("base64url");
 }
 
-function createWranglerCloudflareSetup(): CloudflareSetup {
+export function createWranglerCloudflareSetup(run: typeof runWrangler = runWrangler): CloudflareSetup {
   const workerDir = findWorkerDir();
   const ensureLogin = async () => {
-    const whoami = await runWrangler(["whoami", "--json"]);
+    const whoami = await run(["whoami", "--json"]);
     if (whoami.exitCode === 0) return;
 
-    const login = await runWrangler(["login"], { inherit: true });
+    const login = await run(["login"], { inherit: true });
     if (login.exitCode !== 0) {
       throw new CliFailure("Cloudflare browser login failed");
     }
@@ -367,38 +544,50 @@ function createWranglerCloudflareSetup(): CloudflareSetup {
   return {
     ensureLogin,
     async logout() {
-      const result = await runWrangler(["logout"], { inherit: true });
+      const result = await run(["logout"], { inherit: true });
       if (result.exitCode !== 0) {
         throw new CliFailure("Cloudflare logout failed");
       }
     },
     async whoami() {
-      const result = await runWrangler(["whoami"]);
+      const result = await run(["whoami"]);
       if (result.exitCode !== 0) {
         throw new CliFailure(`Cloudflare whoami failed: ${result.stderr.trim() || result.stdout.trim()}`);
       }
       return result.stdout;
     },
     async putWorkerSecret(token) {
-      const result = await runWrangler(["secret", "put", "API_TOKEN", "--cwd", workerDir], { input: `${token}\n` });
+      const result = await run(["secret", "put", "API_TOKEN", "--cwd", workerDir], { input: `${token}\n` });
       if (result.exitCode !== 0) {
         throw new CliFailure(`failed to upload API_TOKEN with Wrangler: ${result.stderr.trim() || result.stdout.trim()}`);
       }
     },
     async ensureDestination(email) {
       await ensureLogin();
-      const listed = await runWrangler(["email", "routing", "addresses", "list", "--cwd", workerDir]);
+      const listed = await run(["email", "routing", "addresses", "list", "--cwd", workerDir]);
       if (listed.exitCode !== 0) {
         throw new CliFailure(`failed to list Cloudflare destination addresses: ${listed.stderr.trim() || listed.stdout.trim()}`);
       }
       const status = destinationStatusFromWrangler(listed.stdout, email);
       if (status !== "missing") return status;
 
-      const created = await runWrangler(["email", "routing", "addresses", "create", email, "--cwd", workerDir]);
+      const created = await run(["email", "routing", "addresses", "create", email, "--cwd", workerDir]);
       if (created.exitCode !== 0) {
         throw new CliFailure(`failed to create Cloudflare destination address: ${created.stderr.trim() || created.stdout.trim()}`);
       }
       return "pending";
+    },
+    async ensureQueue(name) {
+      await ensureLogin();
+      const listed = await run(["queues", "list"]);
+      if (listed.exitCode !== 0) {
+        throw new CliFailure(`failed to list Cloudflare queues: ${listed.stderr.trim() || listed.stdout.trim()}`);
+      }
+      if (listed.stdout.split("\n").some((line) => line.split(/[│|]/).some((column) => column.trim() === name))) return;
+      const created = await run(["queues", "create", name]);
+      if (created.exitCode !== 0) {
+        throw new CliFailure(`failed to create Cloudflare queue ${name}: ${created.stderr.trim() || created.stdout.trim()}`);
+      }
     }
   };
 }
