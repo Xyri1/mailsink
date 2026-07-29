@@ -34,7 +34,7 @@ Deferred to §13: full-text search, attachment extraction endpoints, webhooks/pu
   Email Routing         │  email()  ── ingest pipeline ──►   │──► R2: raw .eml
   catch-all rule        │                                    │──► D1: emails, aliases
                         │  fetch()  ── /v1 JSON API   ◄──────│◄── CLI / agents (bearer token)
-                        │  send_email() ──────────────► Email Sending
+                        │       └── send binding ─────► Email Sending
                         └────────────────────────────────────┘
 ```
 
@@ -50,7 +50,7 @@ mailsink/
 ├── package.json             # workspaces: ["packages/*"]
 ├── packages/
 │   ├── shared/              # @mailsink/shared — API types + route constants only, zero logic
-│   ├── worker/              # wrangler project: src/email.ts, src/api.ts, src/index.ts
+│   ├── worker/              # wrangler project: src/ingest.ts, src/api.ts, src/index.ts
 │   └── cli/                 # Node CLI, built to dist/index.js, consumes the shared API contract
 ```
 
@@ -67,7 +67,7 @@ Input: `ForwardableEmailMessage` — `message.from` (envelope MAIL FROM), `messa
    - `to_addr` stores the raw RCPT TO verbatim.
 2. **Alias policy check.** `SELECT status, forward_to FROM aliases WHERE alias = ? AND domain = ?`.
    - If `blocked` and `BLOCK_MODE = "reject"` (default): `message.setReject("address unavailable")`, return. Sender receives a permanent failure; nothing is stored.
-   - If `blocked` and `BLOCK_MODE = "drop"`: return without action — Email Routing drops the message silently (sender believes it was delivered). *Caveat:* the no-action-equals-drop behavior is long-observed but not documented in the current Email Service docs; verified by a test in §12.
+   - If `blocked` and `BLOCK_MODE = "drop"`: return without action. Local tests verify that the Worker takes no other action. *Caveat:* Cloudflare does not document the resulting SMTP behavior as a contract. Verify silent drop against a burner deployment before relying on it.
 3. **Buffer the raw message.** Read `message.raw` fully into an `ArrayBuffer`. Inbound cap is 25 MiB vs 128 MB Worker memory; buffering beats stream-teeing in complexity and lets R2 write and parser share one copy.
 4. **Write raw first.** `id = ulid()`; `r2_key = "{domain}/{alias}/{id}.eml"`; `RAW.put(r2_key, buffer)`. The `.eml` is canonical — once this succeeds, the mail cannot be lost by anything downstream.
 5. **Parse** with `postal-mime`. Extract: header From (address + display name), subject, `Date:` header, text body, `has_html`, attachment count.
@@ -295,12 +295,8 @@ Copy `packages/worker/wrangler.toml.example` to the ignored
 ```toml
 name = "mailsink"
 main = "src/index.ts"
-compatibility_date = "2026-06-01"
-workers_dev = false                      # API is reachable only via the custom route
-
-routes = [
-  { pattern = "sink.example.com", custom_domain = true }
-]
+compatibility_date = "2026-07-29"
+workers_dev = true
 
 [vars]
 BLOCK_MODE = "reject"                    # "reject" (bounce) | "drop" (silent)
@@ -338,37 +334,37 @@ Email Routing now lives under the **Email Service** product; all dashboard paths
 The catch-all Worker action itself needs no destination verification. `mailsink route` checks the destination on the active Wrangler Cloudflare account and requests verification when it is missing; it saves the alias mapping only after Cloudflare reports the destination verified.
 
 Notes:
-- **Subaddressing toggle (Email Routing → Settings): leave it at its default (off).** The Worker's `+` folding (§5.1) works either way — unmatched recipients reach the catch-all with `message.to` verbatim. The toggle only changes explicit rules: when on, `realuser+foo@` matches the `realuser@` rule and routes to the real inbox instead of the sink. Either state is coherent; this spec assumes the default (off), which means `+` variants of real addresses fall through to the sink too. Turn it on if you'd rather have `realuser+foo@` follow `realuser@`'s forwarding.
+- **Subaddressing toggle (Email Routing → Settings):** The Worker's `+` folding (§5.1) works in either state when the message reaches the catch-all. When the toggle is on, `realuser+foo@` matches the explicit `realuser@` rule and can bypass the sink. Leave it off if `+` variants of explicit addresses must reach the catch-all. Turn it on if those variants must follow the explicit rule.
 - **Renaming the Worker severs its binding to the catch-all rule** — re-select the Worker in each domain's catch-all rule after a rename.
 
 ### Sending setup
 
-Sending domains are onboarded separately from Email Routing. In **Compute > Email Service > Email Sending**, follow [Cloudflare Email Sending](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/) to publish/verify the generated `cf-bounce` MX, SPF, and DKIM records, create a domain Queue event subscription, bind it to the Worker, and deploy. Never replace an existing DMARC record; use `p=none` during validation. Leave Email Preview enabled at first—on new domains it retains message content for roughly seven days. The user must confirm before deployment or any live send.
+Sending domains are onboarded separately from Email Routing. In **Compute > Email Service > Email Sending**, follow [Cloudflare Email Sending](https://developers.cloudflare.com/email-service/get-started/send-emails/) to onboard the domain and verify its DNS records. Select the Queue and create the domain event subscription on its **Subscriptions** tab. The Worker configuration declares the Queue consumer. Deploy the Worker after these resources are ready. Wrangler 4.115.0 cannot create an `email.sending` subscription because the command has no Email Sending source or domain option. Use the dashboard or REST API. Never replace an existing DMARC record; use `p=none` during validation. Leave Email preview enabled at first. Cloudflare retains previews for about seven days. The user must confirm before deployment or any live send.
 
 ## 11. Operational limits & cost
 
 - Inbound message cap: **25 MiB** (Email Routing). Larger mail is rejected upstream of the Worker.
-- **Workers free plan CPU** can be exceeded parsing very large MIME (big attachments). Sign-up mail is KBs and safe. A CPU-killed handler surfaces as an SMTP transient → sender retries → eventually bounces; the fix, if it ever bites, is Workers Paid ($5/mo).
-- Inbound storage can fit free tiers. Email Sending is [public beta](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/): arbitrary-recipient sending needs Workers Paid, includes 3,000 messages/month, then costs $0.35/1,000. Daily quotas are adaptive and unpublished.
-- Email Sending limits: 50 recipients/message, 5 MiB message, 32 attachments, and 16 KB headers.
+- **Workers Free plan CPU** can be exceeded while parsing a very large MIME message. Cloudflare records this failure as `EXCEEDED_CPU`. Cloudflare does not document the SMTP result as a contract. Use the Workers Paid plan if this limit affects real messages.
+- Inbound storage can fit free tiers. Email Sending is [public beta](https://developers.cloudflare.com/email-service/get-started/send-emails/): arbitrary-recipient sending needs Workers Paid, includes 3,000 messages/month, then costs $0.35/1,000. Daily quotas are adaptive.
+- Cloudflare Email Sending limits: 50 recipients per message, 998 subject characters, 5 MiB for arbitrary recipients, 25 MiB for verified destination addresses, and 16 KB of custom headers. Mailsink also limits a send to 32 attachments.
 - `messageId` means Cloudflare accepted/queued the send, not delivered or received. A live gate is: R2/D1 archive, provider id, terminal Queue event, CLI status, mailbox receipt, and SPF/DKIM/DMARC results.
 - **Upstream filtering:** before rule matching, Cloudflare rejects mail that fails the sender's DMARC policy and mail from RBL-listed IPs. The sink never sees that traffic (fine — it's spam suppression for free), and any end-to-end test mail must come from a DMARC-passing sender or it dies before the Worker runs.
 - Privacy note: `BLOCK_MODE=reject` confirms an address exists-but-refuses; with a catch-all, every address "exists" anyway, so the leak is nil. `drop` is available if you'd rather spammers see success.
 
 ## 12. Testing
 
-- **Unit/integration:** `@cloudflare/vitest-pool-workers` with real D1/R2 bindings (miniflare). Cover: normalization table (casing, `+` folding, weird local parts), blocked→reject vs drop, parse-failure path (`parse_error=1`, envelope fallback, `.eml` still stored), store-before-forward ordering and forward failure recording, ingest batch upsert counts, every endpoint's happy path + `401/400/404`, pagination/`since` cursor math, bulk delete leaves alias status intact.
-- **Local manual:** `wrangler dev` exposes a local email injection endpoint:
+- **Deterministic:** `pnpm test` runs fake-binding fault tests, Worker tests in the Cloudflare Vitest pool, and a local Wrangler email smoke test. The integration tests apply the real D1 migrations and use local D1, R2, Queue, and Email bindings. They cover all six delivery events, duplicate and older events, R2 list pagination, local RFC 5322 inbound handling, and local outbound text and HTML output.
+- **Local manual:** `wrangler dev` exposes a local email injection endpoint. Run this command from the repository root:
 
 ```bash
 curl -X POST "http://localhost:8787/cdn-cgi/handler/email?from=noreply@em.netflix.com&to=netflix-x7f2@example.com" \
   -H "Content-Type: message/rfc822" \
-  --data-binary @fixtures/welcome.eml
+  --data-binary @packages/worker/test/fixtures/plain.eml
 ```
 
-- Fixtures: a small `.eml` corpus — plain text, multipart+HTML, attachment-bearing, and one deliberately malformed message.
-- **One-time inbound platform verification (against a real deployment, before trusting §5.8):** send real mail (from a DMARC-passing sender, per §11) and confirm: (a) a deliberately thrown handler exception produces a *transient* 4xx at the sender (retry, not bounce); (b) returning without action drops the message silently; (c) `setReject` produces a permanent 5xx. Record observed SMTP codes in DECISIONS.md.
+- **Live failure gate:** use a burner deployment before relying on the failure semantics in §5. Confirm that a thrown storage error causes a transient SMTP result, returning without action silently drops the message, and `setReject` causes a permanent SMTP result.
 - **Outbound local/remote:** the local Email Sending binding simulates; `remote=true` sends real mail. Never use the latter without confirmation. Verify provider acceptance, per-recipient Queue terminal events, CLI state, and mailbox/authentication separately.
+- See [the Cloudflare Email Service test strategy](docs/cloudflare-email-service-testing.md) for completed and remaining coverage. See [Cloudflare platform limitations](docs/LIMITATIONS.md) for platform boundaries.
 
 ## 13. Deferred features
 

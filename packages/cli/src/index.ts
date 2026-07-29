@@ -392,10 +392,11 @@ function buildProgram(context: CommandContext) {
     await context.deps.cloudflareSetup.ensureQueue("mailsink-email-events");
     writeHuman(context, [
       `Queue mailsink-email-events is ready for ${sendingDomain}.`,
-      "In the Cloudflare dashboard, open Compute > Email Service > Email Sending > Domains, add this sending domain, and publish and verify its DNS records.",
-      "Then open Compute > Email Service > Email Sending > Event subscriptions, create a domain-scoped subscription for this domain, and select mailsink-email-events.",
+      "In the Cloudflare dashboard, open Compute > Email Service > Email Sending, select Onboard Domain, and verify its DNS records.",
+      "Then select mailsink-email-events on the Queues page and create a domain-scoped event subscription on its Subscriptions tab.",
       "Add DMARC only if no record exists; start with p=none and do not overwrite an existing DMARC record.",
-      "Email Preview is retained for roughly seven days. Verify Worker queue configuration and deploy your Worker before use.",
+      "The bundled Wrangler cannot create an email.sending subscription. Use the dashboard or REST API.",
+      "Email preview is retained for about seven days. Verify Worker queue configuration and deploy your Worker before use.",
       `Run a controlled test when ready: mailsink send recipient@example.com --from sender@${sendingDomain} --subject test --text test`
     ].join("\n"));
   });

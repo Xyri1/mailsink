@@ -46,7 +46,15 @@ Manual setup prompts for the API URL, API token, and default domain, then valida
 mailsink setup sending [domain]
 ```
 
-After confirmation, it creates or verifies `mailsink-email-events`. In **Compute > Email Service > Email Sending**, separately onboard the domain, publish/verify DNS, create its domain event subscription, bind the Queue to the Worker, and deploy. Those steps and any live send remain human actions.
+After confirmation, it creates or verifies `mailsink-email-events`.
+In **Compute > Email Service > Email Sending**, separately onboard the domain
+and verify its DNS records.
+Then select the Queue and create the domain event subscription on its
+**Subscriptions** tab.
+The Worker configuration declares the Queue consumer.
+The bundled Wrangler cannot create an `email.sending` subscription.
+Use the dashboard or REST API, and then deploy the Worker.
+These steps and any live send remain human actions.
 
 ## Configuration
 
@@ -92,7 +100,7 @@ MAILSINK_URL=https://mailsink.your-subdomain.workers.dev MAILSINK_TOKEN=... mail
 Global options go before the command:
 
 ```bash
-mailsink --json ls netflix
+mailsink --json ls inbox netflix
 mailsink --domain example.com latest netflix
 mailsink --exact burn netflix-x7f2
 ```
@@ -224,7 +232,7 @@ Read commands can match multiple aliases:
 - `ls inbox <query>` merges matching aliases' received messages newest first.
 - `aliases [query]` lists matching aliases.
 
-Write commands require exactly one match:
+Without `--exact`, these write commands require exactly one match:
 
 - `burn <alias>`
 - `unburn <alias>`
@@ -232,11 +240,17 @@ Write commands require exactly one match:
 - `route <alias> <destination>`
 - `route <alias> --remove`
 - `purge inbox <alias>`
-- `purge sent <alias>`
 
-If a write query matches multiple aliases, the CLI exits with an error and lists candidates. Use a longer query, `--exact`, or an inline domain to disambiguate.
+If a fuzzy write query matches multiple aliases, the CLI exits with an error
+and lists candidates.
+Use a longer query or `--exact` to disambiguate.
 
-`burn` and `route` can preconfigure a never-seen alias only when intent is explicit:
+`--exact` skips alias lookup for a write command.
+An update command can create an alias when the Worker route uses an upsert.
+Use this option only when the complete alias is intentional.
+
+`burn` and route creation can also preconfigure a never-seen alias when the
+command contains the domain:
 
 ```bash
 mailsink burn promo-new@example.com
@@ -246,6 +260,8 @@ mailsink --exact route support may@email.com
 ```
 
 A bare fuzzy query that matches nothing is an error.
+`purge sent <alias>` does not use fuzzy lookup.
+It always uses the exact alias and the inline, selected, or default domain.
 
 ## JSON output
 

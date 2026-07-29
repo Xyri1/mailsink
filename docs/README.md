@@ -9,6 +9,7 @@ Use the CLI to read, route, block, send, reply, inspect delivery state, or delet
 2. Use [Configuration](configuration.md) to set Worker and CLI values.
 3. Use the [CLI guide](../packages/cli/USAGE.md) to operate Mailsink.
 4. Use [Development](development.md) to test or change the project.
+5. Use [Cloudflare platform limitations](LIMITATIONS.md) before a production deployment.
 
 ## Terms
 
@@ -25,3 +26,4 @@ Use the CLI to read, route, block, send, reply, inspect delivery state, or delet
 
 - [System specification](../SPEC.md)
 - [Decision log](../DECISIONS.md)
+- [Cloudflare Email Service test strategy](cloudflare-email-service-testing.md)

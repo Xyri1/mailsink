@@ -398,11 +398,13 @@ describe("outbound commands", () => {
 
     expect(result.exitCode).toBe(0);
     expect(cloudflareActions).toEqual(["login", "queue:mailsink-email-events"]);
-    expect(result.stdout).toContain("sending domain");
+    expect(result.stdout).toContain("Onboard Domain");
     expect(result.stdout).toContain("DMARC");
     expect(result.stdout).toContain("p=none");
-    expect(result.stdout).toContain("roughly seven days");
+    expect(result.stdout).toContain("about seven days");
     expect(result.stdout).toContain("Compute > Email Service > Email Sending");
+    expect(result.stdout).toContain("Subscriptions tab");
+    expect(result.stdout).toContain("cannot create an email.sending subscription");
     expect(result.stdout).toContain("mailsink send");
   });
 

@@ -1,207 +1,258 @@
 # mailsink
 
-A catch-all email sink for domains on Cloudflare, built for **disposable per-service aliases**. It receives, archives, forwards, and sends mail through the same authenticated Worker.
+Mailsink is a self-hosted email sink for domains on Cloudflare.
+It uses disposable aliases that do not need registration.
 
-Sign up anywhere with an invented address — `netflix-x7f2@example.com` — with no pre-registration. Inbound mail is stored durably and read through a small authenticated JSON API. Route useful aliases to a verified inbox after storage, or **burn** leaked aliases so future mail is rejected.
+Mailsink can receive, store, forward, send, reply to, and delete email.
+One authenticated Worker supplies the JSON API.
 
+## System overview
+
+```mermaid
+flowchart LR
+    SMTP["Inbound SMTP"] --> ROUTING["Cloudflare Email Routing<br/>catch-all"]
+    ROUTING --> EMAIL["Worker email()"]
+    EMAIL --> RAW["R2<br/>raw .eml"]
+    EMAIL --> INBOUND["D1<br/>inbound metadata and aliases"]
+    EMAIL --> FORWARD["Verified forward"]
+
+    CLIENT["CLI or agent"] -->|"Bearer token"| API["Worker fetch()<br/>JSON API"]
+    API <--> ARCHIVE["D1 and R2<br/>archives"]
+    API --> SENDING["Cloudflare Email Sending"]
+    SENDING --> RECIPIENT["Recipient mail server"]
+
+    SENDING --> EVENTS["Domain event subscription"]
+    EVENTS --> QUEUE["Delivery-event Queue"]
+    QUEUE --> CONSUMER["Worker queue()"]
+    CONSUMER --> STATUS["D1<br/>recipient delivery state"]
 ```
-                        ┌────────────────────────────────────┐
-  SMTP (port 25)        │  Worker: mailsink                  │
-  ───────────────►      │                                    │
-  Email Routing         │  email()  ── ingest pipeline ──►   │──► R2: raw .eml
-  catch-all rule        │                                    │──► D1: emails, aliases
-                        │  fetch()  ── /v1 JSON API   ◄──────│◄── CLI / agents (bearer token)
-                        │  send_email() ──────────────► Cloudflare Email Sending
-                        └────────────────────────────────────┘
-```
 
-## How it works
+## Main behavior
 
-- **Implicit aliases.** An alias exists the moment it receives mail. No registration step.
-- **Burning.** `PATCH /v1/aliases/:domain/:alias` with `{"status": "blocked"}` makes future mail bounce at SMTP time (or drop silently with `BLOCK_MODE=drop`). Upserts, so you can pre-block an alias before it's ever used.
-- **Durable storage.** The raw RFC 5322 message in R2 is canonical — written before parsing, never lost even when parsing fails. D1 holds queryable metadata and a truncated text body.
-- **Store-then-forward routes.** Set one verified destination per alias. Mailsink stores the message first, then forwards it; a forwarding failure is recorded without losing or retrying the stored message.
-- **Subaddress folding.** `x+anything@` is normalized to `x@`, so blocking `x` blocks every tag variant.
-- **One Worker, N domains.** Point each zone's Email Routing catch-all at the same Worker. Explicit routing rules for real addresses keep working — only unmatched recipients reach the sink.
-- **Explicit outbound identities.** Any authenticated agent may send to any address, but every send names `from`. The CLI expands a local part with its configured default domain; the Worker API requires a full address on a separately onboarded sending domain. An unseen alias is created; a blocked alias cannot send.
-- **The dominant query in one round trip:**
+- An alias exists after its first inbound message or outbound send.
+- You can block an alias before it receives a message.
+- You can also add a route before an alias receives a message.
+- The default block mode rejects new mail during the SMTP transaction.
+- A blocked alias cannot send mail.
+- Mailsink stores the raw RFC 5322 message in R2 before it parses the message.
+- D1 stores searchable metadata and a shortened text body.
+- Each alias can forward to one verified destination.
+- Mailsink stores the message before it tries to forward the message.
+- Mailsink folds `name+tag` into the `name` alias.
+- One Worker can serve more than one domain.
+- Each outbound send names its sender.
+- Mailsink stores the structured outbound payload before it submits the message.
+- Queue events update the delivery state for each recipient.
+- A repeated send ID returns the first send record.
+- A reply uses the inbound reply address and thread headers.
 
-  ```
-  GET /v1/emails?alias=netflix-x7f2&domain=example.com&from=netflix&limit=1&include=body
-  ```
+## Requirements
 
-Start with the [user documentation](docs/README.md).
-See [SPEC.md](SPEC.md) for the system design and [DECISIONS.md](DECISIONS.md) for design decisions.
+- Node.js 24 or later.
+- pnpm 11.
+- A Cloudflare account.
+- A domain that uses Cloudflare DNS.
 
-## Repo layout
+> **CAUTION:** Email Routing changes the domain MX records.
+> Do not continue if another service must receive all inbound mail for the domain.
 
-pnpm workspaces monorepo:
+## Get started
 
-| Package | Purpose |
-|---|---|
-| [packages/shared](packages/shared/) | `@mailsink/shared` — API types + route constants, zero runtime logic. A contract change not applied on both sides fails `tsc`. |
-| [packages/worker](packages/worker/) | The Cloudflare Worker: `email()` ingest handler + `/v1` HTTP API. |
-| [packages/cli](packages/cli/) | Node CLI: task-verb client for the `/v1` API, typed against `@mailsink/shared`. |
-
-## API
-
-All routes require `Authorization: Bearer <API_TOKEN>`. Base path `/v1`, JSON in/out.
-
-| Route | Purpose |
-|---|---|
-| `GET /v1/emails` | List, newest first. Filters: `alias`, `domain`, `from` (substring), `since`, `limit`, `cursor`, `include=body` |
-| `GET /v1/emails/:id` | Full metadata + text body |
-| `GET /v1/emails/:id/raw` | Stream the original `.eml` |
-| `DELETE /v1/emails/:id` | Delete one message (D1 row + R2 object) |
-| `DELETE /v1/emails?alias=&domain=` | Bulk purge an alias's mail (both params required) |
-| `GET /v1/aliases` | List aliases. Filters: `q` (substring), `status`, `domain`, `routed=true` |
-| `PATCH /v1/aliases/:domain/:alias` | Set `status`, `note`, and/or `forwardTo`. Upserts for pre-blocking and pre-routing |
-| `GET /v1/sent` | List sent mail. Filters: `alias`, `domain`, `to`, `status` |
-| `POST /v1/sent` | Validate, archive, and submit one structured send |
-| `GET /v1/sent/:id` | Sent record and per-recipient lifecycle |
-| `GET /v1/sent/:id/payload` | Archived versioned structured payload |
-| `POST /v1/emails/:id/reply` | Build and submit a reply to an inbound message |
-| `DELETE /v1/sent/:id` / `DELETE /v1/sent?alias=&domain=` | Delete one sent record or bulk-purge an alias's sent archive |
-
-See [SPEC.md §7](SPEC.md) for full parameter semantics and the error envelope.
-
-## Setup
-
-### Prerequisites
-
-- Node.js 24 LTS
-- pnpm 11
-- A Cloudflare account with one or more domains (Email Routing requires Cloudflare to be the zone's MX — exclusive of other inbound mail providers)
-
-### Deploy the Worker
-
-From the repository root:
+Install the packages from the repository root.
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
+```
 
+Create the storage resources from `packages/worker`.
+
+```bash
 cd packages/worker
-
-# Opens Cloudflare login if Wrangler is not already authenticated
 npx wrangler login
-
-# One-time storage setup, if recreating this deployment
 npx wrangler d1 create mailsink
 cp wrangler.toml.example wrangler.toml
-# Copy the D1 database_id from the create command into wrangler.toml
+```
+
+Copy the new D1 `database_id` value to `wrangler.toml`.
+Then create the other resources and deploy the Worker.
+
+```bash
 npx wrangler r2 bucket create mailsink-raw
 npx wrangler queues create mailsink-email-events
 npx wrangler d1 migrations apply mailsink --remote
-
 npx wrangler deploy
 ```
 
-Git ignores the local `wrangler.toml` because it identifies your Cloudflare resources.
+Enable Email Routing for the domain.
+Set the catch-all action to **Send to a Worker**.
+Select the deployed `mailsink` Worker.
 
-The Worker `API_TOKEN` secret is created by `pnpm run dev init --cloudflare` in the CLI setup below. If you prefer to manage it manually, set it with `npx wrangler secret put API_TOKEN`, then use manual `pnpm run dev init`.
-
-### Connect a domain (repeat per domain)
-
-In the Cloudflare dashboard under **Compute → Email Service → Email Routing**:
-
-1. Onboard the domain (Cloudflare installs MX/SPF/DKIM records automatically).
-2. Keep explicit routing rules for real addresses — they take precedence over the catch-all.
-3. Set the **catch-all rule** to Active with action **Send to a Worker** → `mailsink`.
-
-See [SPEC.md §10](SPEC.md) for caveats (subaddressing toggle, Worker rename severing the binding).
-
-### Enable sending (repeat per sending domain)
-
-Run `mailsink setup sending [domain]` (the default domain is used when omitted). After confirmation, it creates or verifies the `mailsink-email-events` Queue; it never deploys or sends a test message. In the dashboard at **Compute > Email Service > Email Sending**, onboard the domain, publish/verify its `cf-bounce` MX, SPF, and DKIM records, create the domain event subscription, bind the Queue to the Worker, and deploy. Do not replace an existing DMARC record; start with `p=none` while validating. Keep Email Preview enabled initially: new-domain previews retain content for about seven days.
-
-### Use the CLI
-
-From the repo:
+Initialize the CLI from `packages/cli`.
 
 ```bash
-cd packages/cli
-```
-
-Recommended first-time setup uses Wrangler's Cloudflare browser login and then creates the Worker API token for mailsink:
-
-```bash
-pnpm run dev login
-pnpm run dev whoami
+cd ../cli
 pnpm run dev init --cloudflare
 ```
 
-`login` opens Wrangler's Cloudflare OAuth flow when there is no active session. `whoami` confirms the active Cloudflare account. `init --cloudflare` generates a fresh Worker `API_TOKEN`, uploads it with `wrangler secret put API_TOKEN`, validates the Worker API, then stores that same token in the OS credential store.
+This command creates the Worker API token.
+It uploads the token as a Worker secret.
+It also validates the API and stores the token in the operating system credential store.
 
-`init --cloudflare` prompts for:
+Use the complete [getting-started guide](docs/getting-started.md) for all deployment steps.
 
-- **API URL:** the deployed Worker URL, for example `https://mailsink.<account-subdomain>.workers.dev`; a bare hostname is normalized to HTTPS
-- **Default domain:** the email domain to use when a command does not include one, for example `example.com`
+## Enable outbound sending
 
-If you already created and stored a Worker `API_TOKEN` yourself, use manual init instead:
-
-```bash
-pnpm run dev init
-```
-
-Manual `init` prompts for the Worker URL, API token, and default domain, then validates the Worker API before saving. Both init modes write non-secret config to `~/.config/mailsink/config.json` (or `$XDG_CONFIG_HOME/mailsink/config.json`) and store the token in the OS credential store. For scripts or CI, `MAILSINK_URL` and `MAILSINK_TOKEN` override local config and keyring values.
-
-Common commands:
+Run the guided command from `packages/cli`.
 
 ```bash
-mailsink login                            # open Wrangler's Cloudflare browser login
-mailsink whoami                           # show the current Wrangler Cloudflare session
-mailsink logout                           # clear Wrangler's Cloudflare session
-mailsink latest netflix --from netflix      # show latest mail for matching alias(es)
-mailsink ls inbox netflix --from netflix    # list received mail
-mailsink show 01K7VTNH010000000000000000   # full metadata + text body
-mailsink raw 01K7VTNH010000000000000000 -o message.eml
-mailsink burn promo-new@example.com         # pre-block an explicit alias
-mailsink unburn promo-new@example.com
-mailsink aliases net --blocked
-mailsink note netflix "netflix trial 2026-06"
-mailsink route                              # list configured routes
-mailsink route support@example.com may@email.com
-mailsink route support --remove
-mailsink send recipient@example.net --from agent@example.com --subject "Hello" --text "..."
-mailsink send --request message.json         # use - to read the request from stdin
-mailsink reply 01K7VTNH010000000000000000 --text "..." --all
-mailsink ls sent support --to recipient@example.net --status delivered
-mailsink payload <sent-id>
-mailsink purge inbox netflix --yes
-mailsink purge sent support --yes
-mailsink rm 01K7VTNH010000000000000000
+pnpm run dev setup sending [domain]
 ```
 
-Fuzzy alias queries resolve through `GET /v1/aliases?q=...`. Read commands may fan out across multiple matches; write commands require exactly one match. `burn` and `route` can preconfigure an unseen alias when given an inline domain or `--exact`. Add `--json` to any command to emit the raw API response for scripting.
+This command creates or checks the `mailsink-email-events` Queue.
+It does not enable the sending domain or deploy the Worker.
+
+Wrangler can enable Email Sending and inspect its DNS records.
+The Worker configuration declares the Queue consumer.
+Wrangler applies this binding when it deploys the Worker.
+The Cloudflare dashboard or API can create the domain event subscription.
+Deploy the Worker after you complete these steps.
+
+Do not replace an existing DMARC record.
+Use `p=none` while you validate a new sending domain.
+
+Read the [configuration guide](docs/configuration.md) for the required bindings and setup sequence.
+
+## Use the CLI
+
+Examples in this section run the CLI from `packages/cli`.
+An installed package uses the `mailsink` command instead.
+
+```bash
+pnpm run dev latest netflix --from netflix
+pnpm run dev ls inbox netflix
+pnpm run dev show <inbound-id>
+pnpm run dev raw <inbound-id> -o message.eml
+
+pnpm run dev burn promo-new@example.com
+pnpm run dev unburn promo-new@example.com
+pnpm run dev note netflix "netflix trial 2026-06"
+
+pnpm run dev route
+pnpm run dev route support@example.com may@email.com
+pnpm run dev route support@example.com --remove
+pnpm run dev provider gmail support@example.com
+
+pnpm run dev send recipient@example.net \
+  --from agent@example.com \
+  --subject "Hello" \
+  --text "Message text"
+
+pnpm run dev reply <inbound-id> --text "Reply text"
+pnpm run dev ls sent support --status delivered
+pnpm run dev payload <sent-id>
+
+pnpm run dev rm <email-id>
+pnpm run dev purge inbox netflix --yes
+pnpm run dev purge sent support --yes
+```
+
+Put global options before the command.
+
+```bash
+pnpm run dev --json latest netflix
+pnpm run dev --domain example.com latest netflix
+pnpm run dev --exact burn netflix-x7f2
+```
+
+Read the complete [CLI guide](packages/cli/USAGE.md) for command behavior and alias matching.
+
+## API
+
+All API routes use the `/v1` base path.
+All routes require `Authorization: Bearer <API_TOKEN>`.
+
+The API has these resource groups:
+
+| Resource | Operations |
+|---|---|
+| `/v1/emails` | List, read, download raw mail, reply, delete, and purge. |
+| `/v1/aliases` | List, block, unblock, annotate, add a route, and remove a route. |
+| `/v1/sent` | Submit, list, inspect, read payloads, delete, and purge. |
+
+Read [SPEC.md section 7](SPEC.md#7-http-api-fetch-handler) for the complete API contract.
+
+## Repository layout
+
+| Package | Purpose |
+|---|---|
+| [`packages/shared`](packages/shared/) | Contains the shared API types and route constants. |
+| [`packages/worker`](packages/worker/) | Contains the Worker handlers, migrations, and tests. |
+| [`packages/cli`](packages/cli/) | Contains the Node.js CLI and its tests. |
 
 ## Development
 
-```bash
-pnpm test                             # all workspace tests
-pnpm run typecheck                    # tsc across packages
-
-cd packages/worker
-pnpm run dev                          # wrangler dev
-
-cd ../cli
-pnpm run dev --help                   # run the CLI from source
-pnpm run build                        # build packages/cli/dist/index.js
-```
-
-`wrangler dev` exposes a local email injection endpoint for manual testing:
+Run all deterministic checks from the repository root.
 
 ```bash
-curl -X POST "http://localhost:8787/cdn-cgi/handler/email?from=noreply@em.netflix.com&to=netflix-x7f2@example.com" \
-  -H "Content-Type: message/rfc822" \
-  --data-binary @test/fixtures/plain.eml
+pnpm test
+pnpm run typecheck
+pnpm --dir packages/cli run build
 ```
 
-`route support@example.com you@gmail.com` is inbound-only store-then-forward. To send as that address from Gmail, run `mailsink provider gmail support@example.com`; use `smtp.mx.cloudflare.net`, port 465, implicit TLS, username `api_token`, and the alias as Gmail's Send As address. Create and manage the Email Sending:Edit token yourself; mailsink never handles it. Gmail SMTP sends bypass this archive and `ls sent`; their unmatched delivery events are ignored.
+Run the local Worker from `packages/worker`.
+
+```bash
+pnpm run dev
+```
+
+Read the [development guide](docs/development.md) for local email injection and focused checks.
+
+## Known limitations
+
+- Mailsink is for one trusted operator.
+- It uses one bearer token and has no application rate limit.
+- Each alias has one forwarding destination.
+- Mailsink does not retry an immediate forwarding failure.
+- Mailsink makes one provider submission for each send ID.
+- Cloudflare can retry delivery after it accepts the submission.
+- A `delivered` event means that the recipient mail server accepted the message.
+- A `delivered` event does not prove mailbox receipt.
+- D1 stores a maximum of 65,536 characters from an inbound text body.
+- Use the raw `.eml` file for the complete content.
+- Mailsink has no automatic retention or orphan removal.
+- Mailsink has no web user interface, full-text search, attachment extraction, or push notifications.
+- Live end-to-end checks require real Cloudflare credentials and mailbox confirmation.
+- `pnpm test` does not run the live checks.
+
+Read [Cloudflare platform limitations](docs/LIMITATIONS.md) for Email Service
+constraints and local-test boundaries.
 
 ## Cost and delivery
 
-Inbound storage can stay on free tiers. [Email Sending is public beta](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/) and arbitrary recipients require Workers Paid: 3,000 messages/month are included, then $0.35 per 1,000. Daily quotas are adaptive and unpublished. Provider acceptance (`messageId`) is not delivery or mailbox receipt; use the Queue lifecycle, CLI status, and a real mailbox to verify a live send.
+Cloudflare marks Email Sending as a beta service.
+Email Routing is available on the Workers Free and Workers Paid plans.
+Sending to verified destination addresses is free on both plans.
+Sending to arbitrary recipients requires the Workers Paid plan.
 
-## Future work
+The Workers Paid plan includes 3,000 outbound messages each month.
+Additional messages cost $0.35 for each 1,000 messages.
+Cloudflare applies an adaptive daily sending limit to each account.
 
-The remaining deferred work is in [SPEC.md §13](SPEC.md) and [DECISIONS.md](DECISIONS.md) D-015.
+A provider `messageId` proves only that Cloudflare accepted the submission.
+Use Queue state and a real mailbox to verify delivery.
+
+See the current Cloudflare [limits](https://developers.cloudflare.com/email-service/platform/limits/) and [pricing](https://developers.cloudflare.com/email-service/platform/pricing/).
+
+## Documentation
+
+- [User documentation](docs/README.md)
+- [Getting started](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
+- [CLI guide](packages/cli/USAGE.md)
+- [Development](docs/development.md)
+- [Cloudflare Email Service test strategy](docs/cloudflare-email-service-testing.md)
+- [Cloudflare platform limitations](docs/LIMITATIONS.md)
+- [System specification](SPEC.md)
+- [Decision log](DECISIONS.md)
+
+Deferred features are listed in [SPEC.md section 13](SPEC.md#13-deferred-features).

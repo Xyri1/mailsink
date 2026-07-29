@@ -47,9 +47,35 @@ The same bearer token authorizes all inbound and outbound operations. There is n
 
 ## Sending-domain configuration
 
-Inbound Email Routing does not authorize sending. Each `from` domain must be onboarded separately in [Cloudflare Email Sending](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/). The CLI expands local `from` values with its default domain; direct API requests require full addresses. Cloudflare requires a Workers Paid plan to send to arbitrary recipients. Publish the onboarding `cf-bounce` MX, SPF, and DKIM records without replacing existing DMARC; start DMARC at `p=none` while testing.
+Inbound Email Routing does not authorize sending.
+Onboard each `from` domain separately with
+[Cloudflare Email Sending](https://developers.cloudflare.com/email-service/get-started/send-emails/).
+The CLI expands local `from` values with its default domain.
+Direct API requests require complete addresses.
+Cloudflare requires a Workers Paid plan to send to arbitrary recipients.
+Verify the `cf-bounce` MX, SPF, DKIM, and DMARC records.
+Do not replace an existing DMARC record.
+Use `p=none` while you test a new DMARC configuration.
 
-`mailsink setup sending [domain]` confirms then creates or verifies `mailsink-email-events`. In **Compute > Email Service > Email Sending**, still onboard the domain, publish/verify DNS, create its domain event subscription, bind the Queue to the Worker, and deploy. A send is transiently `submitting`, then becomes `accepted` after provider submission; events advance it to per-recipient `delivered`, `deferred`, `bounced`, `failed`, `rejected`, or `complained`. Unmatched events (including Gmail SMTP sends) are ignored.
+`mailsink setup sending [domain]` creates or verifies
+`mailsink-email-events` after confirmation.
+Onboard the domain in **Compute > Email Service > Email Sending**.
+Then select the Queue and create the domain event subscription on its
+**Subscriptions** tab.
+The Worker configuration already declares the Queue consumer.
+Deploy the Worker after the Queue and subscription are ready.
+
+Wrangler 4.115.0 cannot create an `email.sending` event subscription.
+Its `queues subscription create` command has no Email Sending source or domain
+option.
+Use the Cloudflare dashboard or REST API for this subscription.
+
+A send is first `submitting`.
+It becomes `accepted` after provider submission.
+Events change each recipient to `delivered`, `deferred`, `bounced`, `failed`,
+`rejected`, or `complained`.
+Mailsink ignores events that it cannot match.
+This includes events from Gmail SMTP sends.
 
 For local Worker development, put secrets in
 `packages/worker/.dev.vars`.

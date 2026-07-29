@@ -131,12 +131,24 @@ If the command shows the message, the setup is complete.
 Do not deploy or send a live test without your confirmation. Start the guided setup:
 
 ```bash
-mailsink setup sending [domain]
+pnpm run dev setup sending [domain]
 ```
 
-It uses the configured default domain if omitted. After confirmation, it verifies the `mailsink-email-events` Queue (or creates it for an upgraded deployment). In **Compute > Email Service > Email Sending**, separately onboard the sending domain, publish/verify its `cf-bounce` MX, SPF, and DKIM records, create its domain event subscription, bind the Queue to the Worker, and deploy. Those dashboard steps and any live send remain human actions. Do not overwrite an existing DMARC record; use `p=none` during validation. Keep Email Preview enabled initially (it retains content on new domains for about seven days).
+The command uses the configured default domain if you omit the argument.
+After confirmation, it creates or verifies the `mailsink-email-events` Queue.
+In **Compute > Email Service > Email Sending**, onboard the sending domain and
+verify its DNS records.
+Then select the Queue and create the domain subscription on its
+**Subscriptions** tab.
+Deploy the Worker after these resources are ready.
+Do not overwrite an existing DMARC record.
+Use `p=none` during validation.
+Keep Email preview enabled at first.
+Cloudflare retains previews for about seven days.
 
-Before declaring a live send complete, confirm: R2/D1 archive rows, the provider `messageId`, a terminal Queue event, `mailsink ls sent` status, mailbox receipt, and SPF/DKIM/DMARC results.
+Before you accept a live send, confirm the R2 and D1 archive records, the
+provider `messageId`, a terminal Queue event, the `mailsink ls sent` status,
+mailbox receipt, and the SPF, DKIM, and DMARC results.
 
 ## Next steps
 

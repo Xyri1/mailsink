@@ -20,6 +20,17 @@ Run all tests.
 pnpm test
 ```
 
+This command runs the CLI tests, the Worker tests in the Workers runtime, and
+the local Wrangler email smoke test. The Worker integration tests use local D1,
+R2, Queue, and Email simulations. They do not use Cloudflare credentials or
+send real mail.
+
+Run only the local Wrangler email smoke test.
+
+```bash
+pnpm --dir packages/worker run test:smoke:local
+```
+
 Run TypeScript checks.
 
 ```bash
@@ -60,7 +71,13 @@ Put command arguments after `dev`.
 pnpm --dir packages/cli run dev latest docs-test
 ```
 
-Local Email Sending bindings simulate submission. They do not send real mail; `remote=true` does. Do not use remote mode or a live test send without confirmation. A live check needs the archived R2/D1 record, provider `messageId`, terminal Queue event, CLI status, mailbox receipt, and SPF/DKIM/DMARC verification.
+Local Email Sending bindings simulate submission. They do not send real mail.
+A binding with `remote = true` sends real mail. Do not use a remote binding or a
+live test send without confirmation.
+
+A live check needs the archived R2 and D1 records, a provider `messageId`, a
+terminal Queue event, the CLI status, mailbox receipt, and SPF, DKIM, and DMARC
+results.
 
 ## Build the CLI
 

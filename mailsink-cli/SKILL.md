@@ -34,14 +34,11 @@ Use pnpm and Node.js.
 - Preserve fuzzy alias lookup through `GET /v1/aliases`.
 - Allow read commands to combine multiple matches.
 - Require one unambiguous match for fuzzy writes.
-- Preserve the current explicit-write rules: `--exact` bypasses lookup for every write command, and `burn` can also pre-block with an inline domain.
+- Preserve the current explicit-write rules: `--exact` bypasses lookup for every write command, and `burn` and route creation can also target a never-seen alias with an inline domain.
 - Keep `--json` output API-shaped and free of human formatting.
 
-Treat exact write behavior as an existing contract mismatch:
-the source bypasses lookup for every `--exact` write, while
-`packages/cli/USAGE.md` and D-016 describe pre-blocking only for `burn`.
-If a task touches this boundary, reconcile the source, tests, and documented
-contract explicitly instead of silently broadening behavior.
+`purge sent` uses an exact alias and domain.
+It does not use fuzzy alias lookup.
 
 Treat `.env`, `.dev.vars`, `.secrets`, and the local
 `packages/worker/wrangler.toml` as untracked local state.

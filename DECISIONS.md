@@ -4,8 +4,8 @@
 
 **Context.** The only reader is a CLI. It could query D1/R2 through Cloudflare's own APIs, or through an API the Worker exposes.
 **Decision.** The Worker exposes a `/v1` JSON API; mail data and alias configuration go through it. The `route` control flow may also call Wrangler to verify a Cloudflare destination address, but never reads D1 or R2 directly.
-**Rejected.** (B) Ingest-only Worker + CLI → D1 HTTP API + R2 keys: puts a Cloudflare account token and R2 credentials on every CLI machine, couples the CLI to the SQL schema, and the Worker needs D1 for the blocklist anyway — coupling kept, little code saved. (C) Queue pipeline: retries/burst capacity irrelevant at personal volume; requires Workers Paid.
-**Consequences.** ~6 routes of Worker code; one revocable bearer secret on client machines; schema stays private to the Worker; the same API can later serve agents or a UI.
+**Rejected.** (B) Ingest-only Worker + CLI → D1 HTTP API + R2 keys: puts a Cloudflare account token and R2 credentials on every CLI machine, couples the CLI to the SQL schema, and the Worker needs D1 for the blocklist anyway — coupling kept, little code saved. (C) Queue pipeline: retries and burst capacity are not necessary at personal volume, and the extra delivery stage adds failure states.
+**Consequences.** A small set of Worker routes; one revocable bearer secret on client machines; schema stays private to the Worker; the same API can later serve agents or a UI.
 
 ## D-002 — Monorepo, pnpm workspaces, anemic shared package
 
@@ -26,7 +26,7 @@
 **Context.** "Burning" a leaked alias is the defining feature for disposable aliases.
 **Decision.** `setReject("address unavailable")` during the SMTP transaction; nothing stored. `BLOCK_MODE=drop` flips to silent drop (return without action).
 **Rejected.** Store-but-hide (still accumulates junk, costs storage, sender keeps a working address); drop as default (lying to legitimate senders by default felt wrong; bounces also get spam lists to prune).
-**Consequences.** Sender sees a permanent failure. Reject confirms exists-but-refuses, but under a catch-all every address "exists," so the information leak is nil.
+**Consequences.** Sender sees a permanent failure in reject mode. Reject confirms exists-but-refuses, but under a catch-all every address "exists," so the information leak is nil. Cloudflare does not document the SMTP result of returning without an action, so live failure testing must verify drop mode.
 
 ## D-005 — Alias normalization: lowercase + subaddress folding
 
@@ -82,11 +82,11 @@
 
 **Decision.** Any storage failure throws out of `email()`; the sender's MTA retries. A successful R2 write followed by a D1 failure leaves an orphan `.eml` (the retry stores under a fresh ULID).
 **Rejected.** Swallow-and-drop (silent mail loss); compensating R2 delete on D1 failure (the delete can also fail — recursion of the same problem); two-phase patterns (ceremony, still imperfect).
-**Consequences.** Mail is never lost while appearing delivered. Orphans are inert, prefix-discoverable, and a future cron can remove them.
+**Consequences.** Mail is never lost while appearing delivered if Cloudflare gives an unhandled Worker error a transient SMTP result. Cloudflare does not document that result as a contract. Verify it with a burner deployment before relying on it. Orphans are inert, prefix-discoverable, and a future cron can remove them.
 
 ## D-014 — No HTTP framework
 
-**Decision.** Hand-rolled routing (`URLPattern`/switch) for ~6 routes.
+**Decision.** Hand-rolled routing (`URLPattern`/switch) for the small API route set.
 **Rejected.** Hono — fine tool, but a dependency for routing this small contradicts the YAGNI posture.
 **Consequences.** Zero framework lock-in; revisit if the route count meaningfully grows (it shouldn't — see D-015).
 
@@ -105,7 +105,7 @@ Deferred, with the trigger that would justify each:
 **Context.** The CLI needed to make common disposable-alias workflows fast without making users type full aliases and ULIDs.
 **Decision.** `packages/cli` is a Node/Commander client for the Worker `/v1` API, built with esbuild to `dist/index.js`. It stores only URL/default-domain config on disk, stores the API token via `@napi-rs/keyring`, supports `MAILSINK_URL`/`MAILSINK_TOKEN` for scripts, and exposes task verbs including `send`, `reply`, `ls inbox`, `ls sent`, and `payload`. Wrangler owns Cloudflare login, Worker-secret upload, and route-destination verification; mailsink adds no Cloudflare SDK or account-token storage.
 **Rejected.** A schema-coupled D1/R2 client; plaintext token config; a low-level endpoint-shaped CLI.
-**Consequences.** The common flow is `mailsink latest netflix --from netflix`; fuzzy alias resolution stays client-side over `GET /v1/aliases`, read commands may fan out, and write commands require an unambiguous alias. Development uses pnpm scripts, and installed CLI commands run through Node.
+**Consequences.** The common flow is `mailsink latest netflix --from netflix`; fuzzy alias resolution stays client-side over `GET /v1/aliases`, and read commands may fan out. Fuzzy writes require one match. `--exact` skips alias lookup for write commands. `burn` and route creation can also target a never-seen alias when the command includes the domain. Sent purge uses an exact alias and domain instead of fuzzy lookup. Development uses pnpm scripts, and installed CLI commands run through Node.
 
 ## D-017 — Per-alias routing is store-then-forward
 
