@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mailsink-local-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "vars": {
+    "API_TOKEN": "test-token",
+    "BLOCK_MODE": "reject"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mailsink-local-test",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RAW",
+      "bucket_name": "mailsink-local-test-raw"
+    }
+  ],
+  "send_email": [
+    {
+      "name": "EMAIL"
+    }
+  ],
+  "queues": {
+    "consumers": [
+      {
+        "queue": "mailsink-local-test-events"
+      }
+    ]
+  }
+}

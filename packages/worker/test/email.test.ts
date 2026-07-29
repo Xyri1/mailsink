@@ -1,7 +1,7 @@
-import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import worker from "../src/index";
 import { makeEnv } from "./fakes";
+import plain from "./fixtures/plain.eml?raw";
 
 class FakeEmailMessage {
   raw: ReadableStream<Uint8Array>;
@@ -25,8 +25,6 @@ class FakeEmailMessage {
     this.forwarded.push(destination);
   }
 }
-
-const plain = await readFile(new URL("./fixtures/plain.eml", import.meta.url), "utf8");
 
 describe("email ingest", () => {
   test("stores before forwarding the configured base alias route", async () => {

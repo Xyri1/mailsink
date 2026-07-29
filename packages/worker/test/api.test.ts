@@ -118,7 +118,7 @@ describe("email API", () => {
     const raw = await worker.fetch(request("/v1/emails/01K7VTNH010000000000000000/raw"), env);
     expect(raw.status).toBe(200);
     expect(raw.headers.get("Content-Type")).toBe("message/rfc822");
-    expect(await raw.text()).toBe("raw message");
+    expect(new TextDecoder().decode(await raw.arrayBuffer())).toBe("raw message");
 
     const deleted = await worker.fetch(request("/v1/emails/01K7VTNH010000000000000000", { method: "DELETE" }), env);
     expect(deleted.status).toBe(200);
